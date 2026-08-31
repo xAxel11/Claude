@@ -1,0 +1,22 @@
+# build products
+build/
+bin/
+dist/
+*.o
+*.obj
+*.exe
+*.dSYM/
+
+# things a run leaves behind
+oai-checkpoint.bin
+*.ckpt
+oai.log
+*.tmp
+oai.conf
+
+# editors and platforms
+.vscode/
+.idea/
+.DS_Store
+__pycache__/
+*.pyc

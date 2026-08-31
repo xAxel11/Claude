@@ -1,0 +1,35 @@
+# oai.conf -- copy this next to the binary as "oai.conf" and Oai will read it
+# at start-up. Command-line flags always override what is in here.
+#
+# Every key matches a --flag of the same name, minus the dashes.
+
+# --- data ------------------------------------------------------------------
+corpus     = data/corpus.txt
+checkpoint = oai-checkpoint.bin
+# log      = oai.log            # also append the learning feed to a file
+
+# --- model -----------------------------------------------------------------
+context = 12                    # characters of history per prediction
+embed   = 24                    # embedding width
+hidden  = 256                   # hidden units
+
+# --- training --------------------------------------------------------------
+batch        = 64
+lr           = 0.003
+weight-decay = 0.0001
+clip         = 5.0              # gradient-norm clip; 0 disables it
+steps        = 0                # 0 = train until you cancel
+seed         = 1337
+
+# --- compute ---------------------------------------------------------------
+backend    = auto               # auto | cpu | gpu
+gpu-budget = 0.5                # the share of the GPU Oai may use
+gpu        = 0                  # which device, when there are several
+threads    = 0                  # CPU workers; 0 = one per core
+
+# --- interface -------------------------------------------------------------
+ui           = 1                # 0 is the same as --no-ui
+sample-every = 100              # steps between generated samples
+sample-len   = 180
+temp         = 0.8
+train        = 0                # 1 starts training the moment Oai opens

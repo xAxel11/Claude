@@ -1,0 +1,95 @@
+# Builds and tests Oai on Linux, macOS and Windows, and cross-compiles the
+# Windows executable from Linux the same way tools/build_exe.py does locally.
+#
+# Part of Oai. SPDX-License-Identifier: MIT
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} / ${{ matrix.cc }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  cc: gcc }
+          - { os: ubuntu-latest,  cc: clang }
+          - { os: macos-latest,   cc: clang }
+          - { os: windows-latest, cc: gcc }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Build and test (make)
+        if: runner.os != 'Windows'
+        env:
+          CC: ${{ matrix.cc }}
+        run: |
+          make
+          make test
+
+      - name: Build and test (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          make
+          make test
+
+      - name: Build a single executable
+        run: python3 tools/build_exe.py --force
+
+      - name: Headless training run
+        shell: bash
+        run: |
+          ./dist/oai* --no-ui --train --steps 400 --sample-every 200 \
+                      --checkpoint ci-ckpt.bin < /dev/null | tail -20
+          test -s ci-ckpt.bin || { echo "no checkpoint written"; exit 1; }
+
+      - name: Resume from that checkpoint
+        shell: bash
+        run: |
+          ./dist/oai* --no-ui --train --steps 50 --sample-every 0 \
+                      --checkpoint ci-ckpt.bin < /dev/null | grep -q resumed
+
+  sanitizers:
+    name: sanitizers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make debug
+      - run: make test
+
+  cross-windows:
+    name: cross-compile Oai.exe
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - run: python3 tools/build_exe.py --target windows --static --strip --zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Oai-windows-x86_64
+          path: dist/*.zip
+
+  static-analysis:
+    name: static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: Warnings must stay at zero
+        run: |
+          make 2>&1 | tee build.log
+          ! grep -q "warning:" build.log
+      - run: cppcheck --enable=warning,performance,portability --std=c99 \
+                      --quiet --error-exitcode=1 -Iinclude src tests
+      - name: Embedded kernels match kernels/matmul.cl
+        run: python3 tools/embed_kernels.py --check

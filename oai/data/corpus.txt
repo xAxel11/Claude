@@ -1,0 +1,188 @@
+the machine does not know anything when it starts. every number inside it is
+random. it reads a window of characters and it guesses what comes next, and at
+first the guess is worthless, because a random network has no reason to prefer
+one letter over another. the only thing it has going for it is that we can
+measure exactly how wrong it was, and we can push every number a little way in
+the direction that would have made it less wrong.
+
+that is the whole idea. do it once and nothing happens. do it a hundred
+thousand times and the network begins to notice that a q is nearly always
+followed by a u, that a space follows a period more often than not, that after
+the letters t and h the letter e is a very good bet. none of this was
+programmed. it fell out of counting mistakes.
+
+we call the measure of wrongness the loss. when the model is guessing at random
+across a vocabulary of about seventy symbols, the loss sits near the logarithm
+of seventy, which is a little over four. that number is the price of total
+ignorance. as the model learns, the loss falls. a loss of three means it has
+learned something about which characters are common. a loss of two means it has
+learned the shape of words. a loss near one means it has learned the shape of
+sentences, and it is starting to remember phrases it has seen before.
+
+the exponential of the loss is called the perplexity, and it has a nicer
+meaning: it is roughly the number of characters the model is still choosing
+between at each position. a perplexity of seventy is a coin toss with seventy
+faces. a perplexity of four means it has narrowed the field down to about four
+plausible letters, which is close to what a person does when reading a word
+with the last letter covered up.
+
+there are three pieces inside this model and each does a simple job.
+
+the first is the embedding table. a character is not a number in any meaningful
+sense. the letter a is not one less than the letter b in any way that helps.
+so we give every character in the vocabulary its own small vector of numbers,
+and we let training decide what those numbers should be. after a while
+something interesting happens: the vectors for the vowels drift toward each
+other, and the vectors for the digits form their own cluster, and the space
+character ends up somewhere all by itself. nobody told the model that vowels
+were a category. it discovered that they behave alike.
+
+the second piece is the hidden layer. it takes the vectors for every character
+in the window, laid end to end, and mixes them together into a new vector of
+its own. the mixing is a matrix multiply followed by a squashing function, and
+the squashing is what makes the whole thing more than a fancy average. without
+it, stacking layers would gain you nothing at all, because a chain of linear
+maps is just another linear map. the squashing bends the space, and a bent
+space can separate things a flat one cannot.
+
+the third piece is the output layer. it scores every character in the
+vocabulary, and the softmax turns those scores into probabilities that add up
+to one. the probability it assigns to the character that actually came next is
+the thing we want to be large. the negative logarithm of that probability is
+the loss for that example, and averaging over a batch gives the loss for the
+step.
+
+then comes the part everyone finds strange the first time. we want to know how
+much each of the eighty thousand numbers in the network contributed to the
+error. computing that one number at a time would take forever. instead we run
+the whole computation backwards. the error at the output tells us the error at
+the hidden layer, which tells us the error at the embeddings. every operation
+in the forward pass has a partner in the backward pass, and the partner is
+usually simpler than the original. this is backpropagation, and it is really
+just the chain rule from calculus applied carefully and in the right order.
+
+once we have the gradient, we take a step. the simplest rule is to subtract a
+small multiple of the gradient from every parameter, and that works, but it is
+slow and it wobbles. the optimizer used here keeps two running averages for
+every parameter: one of the gradient itself, and one of the gradient squared.
+the first is momentum, which carries the parameter through flat stretches. the
+second is a per parameter scale, which shrinks the step where the gradient has
+been large and noisy and lengthens it where the gradient has been small and
+steady. together they make the descent much steadier than plain gradient
+descent, and they cost only two extra numbers per parameter.
+
+there is one more safeguard. sometimes a batch produces an enormous gradient,
+usually because it contains something the model has never seen. if we take a
+step proportional to that gradient we can undo an hour of progress in a single
+update. so we measure the length of the whole gradient vector, and if it is
+longer than a threshold we shrink it back down to the threshold while keeping
+its direction. this is called gradient clipping and it is the difference
+between a run that finishes and a run that explodes.
+
+training in this program happens on its own thread. that is not an
+optimization, it is what makes the thing usable. the loop checks a single
+atomic flag at the top of every iteration, and when the flag is set it stops,
+writes the weights to disk, and returns. cancelling costs you the batch that
+was in flight and nothing else. you can stop it, look at what it has learned,
+change the learning rate, and start it again, and it picks up exactly where it
+left off, because the optimizer state is saved alongside the weights.
+
+the interface shows two things at once. on the left is the learning feed: the
+loss falling, the norm of the gradient, samples of what the model can write at
+this moment, and the characters it currently believes are most likely to
+follow a given prefix. on the right is a chat box. anything you type that is
+not a command is fed into the model as a prompt, and the model continues it.
+early in training the continuation is noise. later it is words. later still it
+is sentences that are almost right, which is somehow more unsettling than the
+noise.
+
+about the graphics card. a graphics card is very good at multiplying matrices
+and very bad at being shared. most programs take the whole device and hold it
+until they are done. this one asks for a share and sticks to it. when the
+driver supports splitting a device into pieces, it asks for a piece with the
+requested fraction of the compute units and works only inside that piece; the
+rest of the card carries on with whatever else it was doing. when the driver
+does not support splitting, which is the common case on consumer hardware, it
+measures how long each batch of work occupied the device and then deliberately
+does nothing for a proportional stretch afterwards. over a few seconds the
+occupancy settles at the fraction you asked for. the memory it allocates is
+capped at the same fraction, and if the model would not fit inside that cap it
+declines the device and runs on the processor instead.
+
+the processor path is not an afterthought. the matrix multiplies are blocked so
+that the pieces being multiplied stay in cache, and they are split across a
+pool of worker threads that park on a condition variable when there is nothing
+to do. on a four core machine the training loop runs roughly twice as fast with
+the pool as without it, which is about what you should expect once memory
+bandwidth is taken into account.
+
+a word about corpora. the model learns the text you give it and nothing else.
+give it a thousand characters and it will memorize them, and you will see the
+training loss fall to almost nothing while the held out loss climbs, which is
+the clearest picture of overfitting you are ever likely to get. give it a
+megabyte of ordinary prose and it will learn spelling, spacing, punctuation,
+and the rhythm of sentences, and it will invent words that do not exist but
+that look like they should. that gap, between memorizing and generalizing, is
+the central problem of the field, and you can watch it open and close in a
+program small enough to read in an afternoon.
+
+none of this is a large language model. there is no attention here, no
+transformer, no pretraining on the open internet. it is a feedforward network
+over a fixed window of characters, which is an architecture from the early two
+thousands. it is here because everything in a modern system is present in it in
+miniature: a representation that is learned rather than designed, a nonlinear
+mixing layer, a probability distribution over a vocabulary, a loss that
+measures surprise, gradients computed by running the computation backwards, and
+an optimizer that decides how far to move. understand this and the larger
+systems are a matter of scale and of clever architecture, not of a different
+kind of magic.
+
+the code is plain c. there is no framework, no build system beyond a makefile,
+and no dependency that is not part of the standard library. the graphics
+support is loaded at run time by name, so the same binary runs on a machine
+with a card and a machine without one. the whole thing compiles in a couple of
+seconds and produces one executable that you can copy to another computer and
+run.
+
+writing it in c was a choice with consequences. you have to allocate your own
+memory and free it, and you have to think about which thread owns which piece
+of state, and there is no library call that will differentiate a function for
+you. in exchange you get to see every number that moves. when the loss does not
+fall you cannot blame a layer you did not write, because you wrote all of them.
+that is a good position to learn from, even if it is a poor position from which
+to train something enormous.
+
+a few practical notes for anyone reading the source. the tensor file holds the
+matrix type and the small set of operations the model needs. the network file
+holds the forward pass, the backward pass, the optimizer, and the code that
+reads and writes checkpoints. the training file holds the loop and everything
+it reports. the interface file holds a grid of cells, drawn into a back buffer
+and compared against the front buffer so that only the characters that actually
+changed are written to the terminal, which is why the display does not flicker
+even while the feed is scrolling quickly.
+
+if you want to change something, start with the model size. widen the hidden
+layer and watch the loss fall further and the speed fall with it. lengthen the
+window and watch it learn longer range structure, at the cost of more
+parameters in the first layer than you probably expected. shrink the embedding
+and watch it struggle to tell characters apart. every one of these knobs is a
+command line flag, and every one of them teaches you something the moment you
+turn it.
+
+and if the loss stops falling, the usual causes are these, in order of how
+often they are actually the problem: the learning rate is too high and the run
+is bouncing around a minimum rather than descending into it; the learning rate
+is too low and it is descending so slowly that nothing appears to happen; the
+model is too small to represent what the text contains; the text is too small
+and the model has already memorized it. the held out loss tells you which of
+the last two you are looking at. when the training loss falls and the held out
+loss rises, you have memorized. when both are flat and high, you are too small.
+
+there is a particular pleasure in watching a program learn something you did
+not teach it. the first time the samples stop being noise and start containing
+real words, spelled correctly, with spaces in sensible places, it is difficult
+not to feel that something has happened. nothing has happened, of course. a few
+tens of thousands of floating point numbers have been nudged around by an
+algorithm that has no idea what a word is. but the words are there on the
+screen, and they were not there an hour ago, and they came out of counting
+mistakes.
