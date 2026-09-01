@@ -15,8 +15,8 @@
 
 #define OAI_VERSION_MAJOR 1
 #define OAI_VERSION_MINOR 0
-#define OAI_VERSION_PATCH 1
-#define OAI_VERSION_STRING "1.0.1"
+#define OAI_VERSION_PATCH 2
+#define OAI_VERSION_STRING "1.0.2"
 
 #ifdef __cplusplus
 extern "C" {

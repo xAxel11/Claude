@@ -31,16 +31,23 @@ void oai_app_setup_backend(oai_app *app)
         oai_gpu_get_info(&app->gpu);
         oai_stream_push(app->learning, OAI_LINE_EVENT,
             "compute: %s (%s)", app->gpu.device_name, app->gpu.vendor);
-        oai_stream_push(app->learning, OAI_LINE_INFO,
-            "gpu budget %.0f%% -- %d of %d compute units, up to %lu MB of "
-            "%lu MB. %s",
-            app->gpu.budget * 100.0f, app->gpu.compute_units_used,
-            app->gpu.compute_units_total, app->gpu.budget_mem_mb,
-            app->gpu.global_mem_mb,
-            app->gpu.partitioned
-              ? "Enforced by device fission: the rest of the device is untouched."
-              : "Enforced by duty cycling: Oai yields the device between "
-                "batches so other work keeps running.");
+        if (app->gpu.partitioned)
+            oai_stream_push(app->learning, OAI_LINE_INFO,
+                "gpu budget %.0f%% -- %d of %d compute units reserved by "
+                "device fission, up to %lu MB of %lu MB. The rest of the "
+                "device is untouched.",
+                app->gpu.budget * 100.0f, app->gpu.compute_units_used,
+                app->gpu.compute_units_total, app->gpu.budget_mem_mb,
+                app->gpu.global_mem_mb);
+        else
+            oai_stream_push(app->learning, OAI_LINE_INFO,
+                "gpu budget %.0f%% -- this driver cannot partition the "
+                "device, so Oai uses all %d compute units but only %.0f%% of "
+                "the time, yielding between batches. Memory is capped at "
+                "%lu MB of %lu MB.",
+                app->gpu.budget * 100.0f, app->gpu.compute_units_total,
+                app->gpu.budget * 100.0f, app->gpu.budget_mem_mb,
+                app->gpu.global_mem_mb);
         return;
     }
 
@@ -84,11 +91,21 @@ void oai_app_calibrate_backend(oai_app *app)
             "against %.2f ms on the CPU -- using the GPU",
             app->gpu.cal_gpu_ms, app->gpu.cal_cpu_ms);
     } else {
-        oai_stream_push(app->learning, OAI_LINE_WARN, "%s", app->gpu.status);
+        /* Not a warning: measuring and picking the faster path is Oai working
+         * correctly, and red text here reads as something having gone wrong. */
+        oai_stream_push(app->learning, OAI_LINE_EVENT,
+            "calibration: %s is %.1fx slower than the CPU at this model size "
+            "(%.2f ms against %.2f ms per step), so training will run on the "
+            "CPU.",
+            app->gpu.device_name,
+            app->gpu.cal_cpu_ms > 0.0f
+                ? app->gpu.cal_gpu_ms / app->gpu.cal_cpu_ms : 1.0f,
+            app->gpu.cal_gpu_ms, app->gpu.cal_cpu_ms);
         oai_stream_push(app->learning, OAI_LINE_INFO,
-            "a model this small spends most of a GPU call waiting on the bus. "
-            "Try --hidden 1024 --batch 256 to give the device something worth "
-            "the trip, or --backend gpu to use it anyway.");
+            "That is expected: a model this small spends most of a GPU call "
+            "waiting on the bus rather than computing. Try --hidden 1024 "
+            "--batch 256 to give the card something worth the trip, or "
+            "--backend gpu to use it anyway.");
     }
 }
 

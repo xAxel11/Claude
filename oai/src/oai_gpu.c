@@ -806,8 +806,7 @@ int oai_gpu_calibrate_finish(int force)
 
     if (force) {
         snprintf(G.info.status, sizeof G.info.status,
-                 "GPU kept because --backend gpu was given, though it is "
-                 "%.1fx slower than the CPU at this model size",
+                 "GPU forced, though %.1fx slower than the CPU here",
                  G.cal_gpu / G.cal_cpu);
         return 1;
     }
@@ -818,10 +817,12 @@ int oai_gpu_calibrate_finish(int force)
         float ratio = (float)(G.cal_gpu / G.cal_cpu);
         snprintf(device, sizeof device, "%.60s", G.info.device_name);
         oai_gpu_shutdown();
+        /* Short on purpose: this string is shown on the one-line header, where
+         * anything longer is cut off. The full explanation goes to the feed. */
         snprintf(G.info.status, sizeof G.info.status,
-                 "%s is %.1fx slower than the CPU at this size "
-                 "(%.2f ms vs %.2f ms per step), so Oai is using the CPU",
-                 device, ratio, gpu_ms, cpu_ms);
+                 "GPU %.1fx slower than the CPU here, so using the CPU",
+                 ratio);
+        (void)device;
         G.info.calibrated = 1;
         G.info.cal_gpu_ms = gpu_ms;
         G.info.cal_cpu_ms = cpu_ms;

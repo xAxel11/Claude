@@ -379,21 +379,106 @@ static const char *state_text(oai_train_state s)
 }
 
 /* Draws a stream into a pane, newest at the bottom. */
+/* Folds `text` into rows of at most `width` columns, breaking on spaces where
+ * there is a sensible one and mid-word only when a word is wider than the
+ * pane. `offsets` receives the byte offset of each row (always on a UTF-8
+ * boundary) and `widths` the length of each row in columns -- the caller needs
+ * both, because a row that ended at a space is shorter than `width` and must
+ * not spill into the next row's text. Either array may be NULL. Returns the
+ * number of rows, at least 1. */
+#define UI_WRAP_MAX 96
+
+static int cols_between(const char *from, const char *to)
+{
+    int n = 0;
+    while (from < to) {
+        unsigned int cp;
+        from += utf8_next(from, &cp);
+        n++;
+    }
+    return n;
+}
+
+static int wrap_offsets(const char *text, int width, int *offsets,
+                        int *widths, int max)
+{
+    int rows = 1, cols = 0, space_col = -1;
+    const char *p = text;
+    const char *space = NULL;      /* the last space seen on this row */
+
+    if (max < 1) return 0;
+    if (offsets) offsets[0] = 0;
+    if (widths)  widths[0]  = width;
+    if (width < 1) return 1;
+
+    while (*p) {
+        unsigned int cp;
+        const char *cur = p;
+
+        p += utf8_next(p, &cp);
+        if (cp == ' ') { space = cur; space_col = cols; }
+        cols++;
+
+        if (cols < width || !*p) continue;   /* room left, or nothing follows */
+        if (rows >= max) break;
+
+        {
+            /* Break at the last space unless it is so early that doing so
+             * would leave the row nearly empty. */
+            const char *brk = (space && space_col > width / 4) ? space + 1 : p;
+            if (widths)  widths[rows - 1] = (int)(space && space_col > width / 4
+                                                  ? space_col : cols);
+            if (offsets) offsets[rows] = (int)(brk - text);
+            cols = cols_between(brk, p);
+            rows++;
+            space = NULL;
+            space_col = -1;
+        }
+    }
+    if (widths) widths[rows - 1] = cols > 0 ? cols : width;
+    return rows;
+}
+
+/* Draws a stream into a pane, newest at the bottom, folding long lines.
+ *
+ * When following the tail, the top line may be partially scrolled off, so the
+ * starting point is found by walking backwards from the newest line and
+ * accumulating folded heights until the pane is full. */
 static void draw_stream(oai_stream *s, int x0, int y0, int x1, int y1,
                         long scroll, int follow, int prefix_speaker,
                         double now)
 {
-    int  rows = y1 - y0 + 1;
-    long total = oai_stream_total(s);
-    long first = follow ? total - rows : scroll;
-    long i;
+    int  rows   = y1 - y0 + 1;
+    int  indent = prefix_speaker ? 5 : 0;
+    int  width  = x1 - x0 + 1 - indent;
+    long total  = oai_stream_total(s);
+    long first, i;
+    int  skip = 0;      /* rows of the first line that sit above the pane */
     int  y = y0;
 
-    if (first < 0) first = 0;
-    for (i = first; i < first + rows; ++i, ++y) {
+    if (rows < 1 || width < 4) return;
+
+    if (follow) {
+        int used = 0;
+        first = total;
+        while (first > 0 && used < rows) {
+            oai_line ln;
+            if (!oai_stream_get(s, first - 1, &ln)) break;
+            used += wrap_offsets(ln.text, width, NULL, NULL, UI_WRAP_MAX);
+            first--;
+        }
+        if (used > rows) skip = used - rows;
+    } else {
+        first = scroll < 0 ? 0 : scroll;
+    }
+
+    for (i = first; i < total && y <= y1; ++i) {
         oai_line ln;
+        int offsets[UI_WRAP_MAX];
+        int widths[UI_WRAP_MAX];
+        int nrows, r;
         ui_style st;
-        int x = x0;
+
         if (!oai_stream_get(s, i, &ln)) continue;
 
         st = style_for_line(ln.kind);
@@ -402,20 +487,31 @@ static void draw_stream(oai_stream *s, int x0, int y0, int x1, int y1,
         if (now - ln.time < 0.45 && ln.kind != OAI_LINE_USER)
             st = ST_FRESH;
 
-        if (prefix_speaker) {
-            /* Only the first line of a message is labelled; the rest of a
-             * wrapped message is indented under it. */
-            if (ln.cont)
-                x += put_str(x, y, "     ", ST_DIM, x1 - x + 1);
-            else if (ln.kind == OAI_LINE_USER)
-                x += put_str(x, y, "you  ", ST_USER, x1 - x + 1);
-            else if (ln.kind == OAI_LINE_AGENT)
-                x += put_str(x, y, "oai  ", ST_ACCENT, x1 - x + 1);
-            else
-                x += put_str(x, y, "     ", ST_DIM, x1 - x + 1);
-        }
+        nrows = wrap_offsets(ln.text, width, offsets, widths, UI_WRAP_MAX);
 
-        put_str(x, y, ln.text, st, x1 - x + 1);
+        for (r = 0; r < nrows && y <= y1; ++r) {
+            int x = x0;
+            if (skip > 0) { skip--; continue; }
+
+            if (prefix_speaker) {
+                /* Only the first row of a message is labelled; folded rows and
+                 * the tail of a wrapped message are indented under it. */
+                const char *tag = "     ";
+                ui_style tag_st = ST_DIM;
+                if (r == 0 && !ln.cont) {
+                    if (ln.kind == OAI_LINE_USER) {
+                        tag = "you  "; tag_st = ST_USER;
+                    } else if (ln.kind == OAI_LINE_AGENT) {
+                        tag = "oai  "; tag_st = ST_ACCENT;
+                    }
+                }
+                x += put_str(x, y, tag, tag_st, x1 - x + 1);
+            }
+            /* widths[r], not width: a row broken at a space is shorter,
+             * and drawing `width` columns would pull in the next row's text. */
+            put_str(x, y, ln.text + offsets[r], st, widths[r]);
+            y++;
+        }
     }
 }
 
@@ -434,9 +530,19 @@ static void draw_frame(oai_app *app, int *cursor_x, int *cursor_y)
 
     ui_clear_back();
 
-    split    = W * 55 / 100;
-    if (split < 34) split = 34;
-    if (split > W - 30) split = W - 30;
+    /* Roughly 55/45 in favour of the learning feed, but the two clamps used to
+     * contradict each other below about 70 columns -- the lower bound pushed
+     * the split right, the upper bound then pushed it further left than where
+     * it started, and the feed collapsed to a dozen columns. Scale the minimum
+     * with the width instead of fixing it. */
+    split = W * 55 / 100;
+    {
+        int min_left  = W / 3 < 12 ? 12 : W / 3;
+        int min_right = 16;
+        if (split < min_left)      split = min_left;
+        if (split > W - min_right) split = W - min_right;
+        if (split < 12)            split = 12;
+    }
     body_top = 5;
     body_bot = H - 3;
     chat_bot = body_bot - 2;
@@ -549,8 +655,8 @@ static void draw_frame(oai_app *app, int *cursor_x, int *cursor_y)
         put_str(1, H - 1, U.toast, ST_GOOD, W - 2);
     } else {
         put_str(1, H - 1,
-                "^T train   ^X stop   ^P pause   Tab focus   "
-                "PgUp/PgDn scroll   ^L redraw   ^C quit   (or type: help)",
+                "^T train  ^X stop  ^P pause  Tab focus  "
+                "PgUp/PgDn scroll  ^L redraw  ^C quit  (or type help)",
                 ST_DIM, W - 2);
     }
 }

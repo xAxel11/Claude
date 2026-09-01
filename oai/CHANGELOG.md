@@ -4,6 +4,27 @@ All notable changes to Oai are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the version
 numbers follow [semantic versioning](https://semver.org/).
 
+## [1.0.2] - 2026-09-01
+
+### Fixed
+
+- **Long lines in the learning feed were cut off at the pane edge instead of
+  wrapping.** The panes now fold text at draw time, on word boundaries, and
+  break mid-word only when a word is wider than the pane. Folding at draw time
+  rather than when the text is written also means the layout stays correct
+  after the terminal is resized.
+- The device status on the header line is now short enough to fit one; the full
+  explanation goes to the feed, where it can wrap.
+- A calibration result that picks the CPU is no longer printed in red. It is
+  Oai working as intended, and red read as something having gone wrong.
+- The start-up line still described a duty-cycled budget as "N of N compute
+  units". It now says what is actually happening in each mode.
+- Below about 70 columns the two clamps on the pane split contradicted each
+  other -- the lower bound pushed the divider right and the upper bound then
+  pushed it further left than it began -- collapsing the learning feed to a
+  dozen columns. The minimum now scales with the terminal width.
+- The footer no longer runs off the edge of an 80- or 100-column terminal.
+
 ## [1.0.1] - 2026-09-01
 
 ### Fixed
