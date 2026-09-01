@@ -43,6 +43,9 @@ jobs:
           make
           make test
 
+      - name: Build with make_exe.py (the one-command path)
+        run: python3 make_exe.py
+
       - name: Build a single executable
         run: python3 tools/build_exe.py --force
 
@@ -73,7 +76,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - run: python3 make_exe.py --windows
       - run: python3 tools/build_exe.py --target windows --static --strip --zip
+      - name: The release archive must carry make_exe.py and the sources
+        run: |
+          python3 - <<'PY'
+          import glob, zipfile, sys
+          z = zipfile.ZipFile(sorted(glob.glob("dist/*windows*.zip"))[0])
+          names = [n.split("/", 1)[1] for n in z.namelist() if "/" in n]
+          need = ["make_exe.py", "Makefile", "src/main.c", "include/oai.h"]
+          missing = [n for n in need if n not in names]
+          sys.exit(f"missing from the archive: {missing}" if missing else 0)
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: Oai-windows-x86_64

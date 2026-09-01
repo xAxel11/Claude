@@ -31,9 +31,15 @@ The first release.
   The budget is enforced by device fission where the driver supports it,
   otherwise by duty cycling, and device memory is capped at the same fraction.
 - **CPU worker pool** behind `--threads`, splitting the matmuls across cores.
-- **`tools/build_exe.py`** — compiles the whole project into one self-contained
-  executable, cross-compiles to `Oai.exe` with mingw-w64, and packages a
-  release archive.
+- **`make_exe.py`** — a standalone, zero-argument build script at the top of the
+  tree. `python make_exe.py` finds a compiler, builds `Oai.exe` or `oai` beside
+  itself, and names the exact package to install if there is no compiler. It is
+  double-clickable on Windows and ships inside every release archive along with
+  the C sources, so a downloaded binary can always be rebuilt from source in one
+  command.
+- **`tools/build_exe.py`** — the release-engineering version: incremental
+  rebuilds, cross-compilation to `Oai.exe` with mingw-w64, stripping, and
+  packaging a release archive.
 - **`tools/make_zip.py`**, **`tools/gen_corpus.py`**, **`tools/embed_kernels.py`**.
 - **Scripts** for building, running, testing, benchmarking, static analysis,
   packaging and installing, on POSIX and Windows.

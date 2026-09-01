@@ -49,7 +49,32 @@ Then press **`Ctrl+T`** (or type `train`) and watch the left pane. Press
 **`Ctrl+X`** to cancel at any point — it stops within one batch and writes a checkpoint before
 the thread returns, so starting again resumes exactly where you left off.
 
-### Or build a single executable
+### Or build the executable with one Python command
+
+If you would rather not deal with `make`:
+
+```sh
+python make_exe.py
+```
+
+That is the entire command — no arguments, no virtualenv, nothing to install
+from pip. It finds a C compiler, compiles `src/`, and leaves `Oai.exe` (Windows)
+or `oai` (Linux, macOS) right beside itself. On Windows you can double-click
+`make_exe.py` instead of typing anything; if no compiler is installed it prints
+exactly what to install for your system and stops rather than failing quietly.
+
+```sh
+python make_exe.py --run       # build it, then start it
+python make_exe.py --windows   # cross-compile Oai.exe from Linux or macOS
+python make_exe.py --clean
+```
+
+`make_exe.py` ships inside every release archive alongside the C sources, so
+you never have to take a downloaded binary on trust — you can always rebuild it
+in one command.
+
+For release engineering — incremental rebuilds, stripping, packaging archives —
+`tools/build_exe.py` is the fuller version:
 
 ```sh
 python3 tools/build_exe.py                     # -> dist/oai
@@ -57,9 +82,10 @@ python3 tools/build_exe.py --target windows    # -> dist/Oai.exe (cross)
 python3 tools/build_exe.py --zip --strip       # -> dist/Oai-1.0.0-linux-x86_64.zip
 ```
 
-The result is one self-contained file. There is no interpreter to bundle and
-nothing to unpack at start-up, because Oai is C: the corpus fallback and the
-GPU kernels are both compiled into the binary.
+Either way the result is one self-contained file. There is no interpreter to
+bundle and nothing to unpack at start-up, because Oai is C: Python only drives
+the compiler. The corpus fallback and the GPU kernels are both compiled into
+the binary.
 
 ---
 
@@ -204,6 +230,7 @@ Headless mode works properly, which makes it usable from CI and pipes:
 ## Layout
 
 ```
+make_exe.py   one-command build; ships in every release archive
 include/      public headers, one per module
 src/          the implementation
   oai_tensor.c    matrices and the three matmuls
@@ -227,6 +254,7 @@ docs/         architecture notes
 ## Building and testing
 
 ```sh
+python make_exe.py        # ./oai or Oai.exe, no arguments needed
 make                      # bin/oai
 make test                 # unit tests
 make debug                # address + UB sanitizers

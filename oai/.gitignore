@@ -2,6 +2,8 @@
 build/
 bin/
 dist/
+/oai            # make_exe.py drops the executable beside itself
+/Oai.exe
 *.o
 *.obj
 *.exe

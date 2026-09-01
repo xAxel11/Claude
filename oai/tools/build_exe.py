@@ -49,9 +49,15 @@ SOURCES = [
     "oai_tensor.c", "oai_train.c", "oai_ui.c",
 ]
 
-# Files that go into a release archive alongside the binary.
-EXTRA_FILES = ["README.md", "LICENSE", "CHANGELOG.md", "oai.conf.example"]
-EXTRA_DIRS = ["data"]
+# What goes into a release archive alongside the binary.
+#
+# The sources ship with it on purpose: make_exe.py rebuilds the executable from
+# them, so somebody who cannot run the prebuilt binary -- wrong architecture,
+# wrong libc, or simply not trusting a binary from the internet -- has a
+# one-command path to their own.
+EXTRA_FILES = ["README.md", "LICENSE", "CHANGELOG.md", "oai.conf.example",
+               "make_exe.py", "Makefile"]
+EXTRA_DIRS = ["data", "src", "include", "kernels"]
 
 
 # --------------------------------------------------------------------------
@@ -355,25 +361,47 @@ def make_zip(binary: Path, opts) -> Path:
 
 
 def running_notes(binary_name: str) -> str:
+    windows = binary_name.endswith(".exe")
+    run_line = binary_name if windows else f"./{binary_name}"
     return f"""Oai {read_version()}
 =========================================
 
 Run it:
 
-    ./{binary_name}                 (Windows: {binary_name})
+    {run_line}
 
-That opens the interface. Press [t] or type "train" in the chat box to start
-learning, [s] or "stop" to cancel. Cancelling always writes a checkpoint, so
-starting again picks up where you left off.
+That opens the interface. Press Ctrl+T, or type "train" in the chat box, to
+start learning; Ctrl+X or "stop" cancels it. Cancelling always writes a
+checkpoint first, so starting again picks up where you left off.
 
 Useful flags:
 
-    ./{binary_name} --corpus mytext.txt --train
-    ./{binary_name} --gpu-budget 0.25          use a quarter of the GPU
-    ./{binary_name} --backend cpu              ignore the GPU entirely
-    ./{binary_name} --no-ui --steps 5000       headless, for logs and CI
-    ./{binary_name} --list-devices             what OpenCL can see
-    ./{binary_name} --help                     everything else
+    {run_line} --corpus mytext.txt --train
+    {run_line} --gpu-budget 0.25       use a quarter of the GPU
+    {run_line} --backend cpu           ignore the GPU entirely
+    {run_line} --no-ui --steps 5000    headless, for logs and CI
+    {run_line} --list-devices          what OpenCL can see
+    {run_line} --help                  everything else
+
+
+Rebuilding it yourself
+----------------------
+
+The C sources are in this archive too, so you never have to take the bundled
+binary on trust. With Python 3 and a C compiler installed:
+
+    python make_exe.py
+
+That is the whole command -- no arguments, no virtualenv, nothing to install
+from pip. It compiles src/ and leaves a fresh {binary_name} right here. If no
+compiler is found it tells you exactly what to install for your system and
+stops. On Windows you can double-click make_exe.py instead of typing anything.
+
+    python make_exe.py --run       build it and start it immediately
+    python make_exe.py --clean     remove the build files
+    python make_exe.py --help      the rest
+
+If you prefer make, "make" works too and produces bin/{binary_name}.
 
 The binary is self-contained: it needs no runtime, no model download and no
 data files. data/corpus.txt is included because it is nicer to learn from than
