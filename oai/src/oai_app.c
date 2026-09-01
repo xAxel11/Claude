@@ -38,7 +38,7 @@ void oai_app_setup_backend(oai_app *app)
             app->gpu.compute_units_total, app->gpu.budget_mem_mb,
             app->gpu.global_mem_mb,
             app->gpu.partitioned
-              ? "Enforced by device fission: the rest of the GPU is untouched."
+              ? "Enforced by device fission: the rest of the device is untouched."
               : "Enforced by duty cycling: Oai yields the device between "
                 "batches so other work keeps running.");
         return;
@@ -52,6 +52,44 @@ void oai_app_setup_backend(oai_app *app)
     }
     oai_stream_push(app->learning, OAI_LINE_INFO,
                     "compute: CPU. %s", app->gpu.status);
+}
+
+void oai_app_calibrate_backend(oai_app *app)
+{
+    const oai_net *net = &app->trainer.net;
+    int kept;
+
+    if (!oai_gpu_is_active()) return;
+
+    /* The two shapes a forward pass actually runs. */
+    oai_gpu_calibrate_shape(app->cfg.batch_size, net->input_dim, net->hidden);
+    oai_gpu_calibrate_shape(app->cfg.batch_size, net->hidden, net->vocab_size);
+
+    kept = oai_gpu_calibrate_finish(app->cfg.backend == OAI_BACKEND_GPU);
+    oai_gpu_get_info(&app->gpu);
+
+    if (!app->gpu.calibrated) return;
+
+    if (kept && app->gpu.cal_gpu_ms > app->gpu.cal_cpu_ms) {
+        /* --backend gpu overrode the measurement. Say so plainly rather than
+         * reporting it as a win. */
+        oai_stream_push(app->learning, OAI_LINE_WARN,
+            "calibration: the GPU measured %.2f ms per step against %.2f ms "
+            "on the CPU -- it is the slower of the two here, and is being "
+            "used only because --backend gpu asked for it",
+            app->gpu.cal_gpu_ms, app->gpu.cal_cpu_ms);
+    } else if (kept) {
+        oai_stream_push(app->learning, OAI_LINE_INFO,
+            "calibration: this model's matmuls take %.2f ms on the GPU "
+            "against %.2f ms on the CPU -- using the GPU",
+            app->gpu.cal_gpu_ms, app->gpu.cal_cpu_ms);
+    } else {
+        oai_stream_push(app->learning, OAI_LINE_WARN, "%s", app->gpu.status);
+        oai_stream_push(app->learning, OAI_LINE_INFO,
+            "a model this small spends most of a GPU call waiting on the bus. "
+            "Try --hidden 1024 --batch 256 to give the device something worth "
+            "the trip, or --backend gpu to use it anyway.");
+    }
 }
 
 int oai_app_init(oai_app *app, const oai_config *cfg)
@@ -78,6 +116,7 @@ int oai_app_init(oai_app *app, const oai_config *cfg)
         return -1;
     }
     app->trainer.feed_width = &app->feed_width;
+    oai_app_calibrate_backend(app);
     app->ready = 1;
     return 0;
 }

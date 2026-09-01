@@ -464,12 +464,19 @@ static void draw_frame(oai_app *app, int *cursor_x, int *cursor_y)
     }
     put_str(0, 1, buf, st.step > 0 ? ST_DEFAULT : ST_DIM, W);
 
-    if (gi.active)
+    if (gi.active && gi.partitioned)
         snprintf(buf, sizeof buf,
-                 " %s   %d/%d compute units   budget %.0f%%   %s",
-                 gi.device_name, gi.compute_units_used, gi.compute_units_total,
-                 gi.budget * 100.0f,
-                 gi.partitioned ? "partitioned" : "duty cycled");
+                 " %s   %d of %d compute units reserved   budget %.0f%%",
+                 gi.device_name, gi.compute_units_used,
+                 gi.compute_units_total, gi.budget * 100.0f);
+    else if (gi.active)
+        /* Duty cycling uses every compute unit, just not all of the time --
+         * saying "14/14 units, budget 50%" made it look like the budget was
+         * being ignored. */
+        snprintf(buf, sizeof buf,
+                 " %s   %d compute units at a %.0f%% duty cycle   %lu MB cap",
+                 gi.device_name, gi.compute_units_total,
+                 gi.budget * 100.0f, gi.budget_mem_mb);
     else
         snprintf(buf, sizeof buf, " CPU backend   %s", gi.status);
     put_str(0, 2, buf, ST_DIM, W);

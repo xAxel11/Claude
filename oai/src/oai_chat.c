@@ -103,12 +103,20 @@ static void cmd_status(oai_app *app)
         say(app, "%.0f steps/s, %.0f examples/s, %.1f s elapsed.",
             st.steps_per_sec, st.chars_per_sec, st.elapsed);
     }
-    if (gi.active)
-        say(app, "GPU: %s, budget %.0f%% (%s).", gi.device_name,
-            gi.budget * 100.0f,
-            gi.partitioned ? "enforced by device fission" : "duty cycled");
+    if (gi.active && gi.partitioned)
+        say(app, "GPU: %s -- %d of its %d compute units are reserved for me "
+                 "by device fission.",
+            gi.device_name, gi.compute_units_used, gi.compute_units_total);
+    else if (gi.active)
+        say(app, "GPU: %s -- all %d compute units, but only %.0f%% of the "
+                 "time. I hand the device back between batches so nothing "
+                 "else on your machine stalls.",
+            gi.device_name, gi.compute_units_total, gi.budget * 100.0f);
     else
         say(app, "Compute: CPU. %s", gi.status[0] ? gi.status : "");
+    if (gi.calibrated)
+        say(app, "Measured at startup: %.2f ms per step on the GPU against "
+                 "%.2f ms on the CPU.", gi.cal_gpu_ms, gi.cal_cpu_ms);
 }
 
 static void cmd_train(oai_app *app)
@@ -215,13 +223,35 @@ static void cmd_gpu(oai_app *app, const char *arg)
 
     oai_gpu_get_info(&gi);
     if (!arg || !*arg) {
-        if (gi.active)
-            say(app, "%s -- %d of %d compute units, %lu MB of %lu MB, "
-                     "budget %.0f%%.",
+        if (gi.active && gi.partitioned)
+            say(app, "%s -- %d of %d compute units reserved, up to %lu MB of "
+                     "%lu MB, budget %.0f%%.",
                 gi.device_name, gi.compute_units_used, gi.compute_units_total,
                 gi.budget_mem_mb, gi.global_mem_mb, gi.budget * 100.0f);
+        else if (gi.active)
+            say(app, "%s -- %d compute units at a %.0f%% duty cycle, up to "
+                     "%lu MB of %lu MB. The budget is time on the device, not "
+                     "a slice of it: this driver cannot partition the card, so "
+                     "I use all of it and then step aside.",
+                gi.device_name, gi.compute_units_total, gi.budget * 100.0f,
+                gi.budget_mem_mb, gi.global_mem_mb);
         else
             say(app, "No GPU in use. %s", gi.status);
+        if (gi.calibrated)
+            say(app, "At startup one step's matmuls measured %.2f ms on the "
+                     "GPU and %.2f ms on the CPU.",
+                gi.cal_gpu_ms, gi.cal_cpu_ms);
+        /* The budget is a promise; this is the measurement of whether it was
+         * kept, so you never have to take my word for it. */
+        if (gi.active && gi.kernel_calls > 0 && !gi.partitioned) {
+            double total = gi.busy_seconds + gi.idle_seconds;
+            if (total > 0.0)
+                say(app, "So far: %ld dispatches, %.1fs on the device and "
+                         "%.1fs handed back -- %.0f%% occupancy against a "
+                         "%.0f%% budget.",
+                    gi.kernel_calls, gi.busy_seconds, gi.idle_seconds,
+                    100.0 * gi.busy_seconds / total, gi.budget * 100.0f);
+        }
         return;
     }
     b = (float)atof(arg);

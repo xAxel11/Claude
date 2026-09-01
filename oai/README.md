@@ -144,12 +144,39 @@ sticks to it, using three mechanisms in order of preference:
    global memory. If the batch will not fit inside that cap, Oai declines the
    device for that call and runs it on the CPU instead.
 
+The yield is accumulated rather than taken after every dispatch: a single
+step's matmuls each owe about a millisecond, and a sleep that short is
+dominated by the operating system's timer granularity. Ask Oai for `gpu` in
+the chat box and it reports the *measured* occupancy against the budget, so
+you never have to take the promise on trust.
+
+### "auto" means it measures
+
+A small model spends most of a GPU call waiting on the bus rather than
+computing, so on a modest card the CPU is often several times faster. Silently
+being slower because a GPU happens to exist is not what `auto` should mean, so
+at start-up Oai times the model's real matmul shapes on both paths — including
+the cost of the duty cycle — and keeps whichever wins. It says which it picked
+and by how much.
+
+If it picks the CPU and you wanted the GPU, either give the device something
+worth the trip (`--hidden 1024 --batch 256`) or override it with
+`--backend gpu`, which keeps the GPU and tells you plainly that it is the
+slower choice.
+
 ```sh
 ./bin/oai --gpu-budget 0.25          # a quarter of the GPU
 ./bin/oai --gpu-budget 1.0           # all of it, if you want
 ./bin/oai --backend cpu              # ignore the GPU entirely
+./bin/oai --backend gpu              # use it even if measurement says not to
 ./bin/oai --list-devices             # what OpenCL can see from here
 ```
+
+Oai ignores CPU OpenCL devices, since routing work through a runtime to reach
+the processor it already uses directly is never faster. Setting
+`OAI_OPENCL_ALLOW_CPU=1` includes them anyway, which is how the OpenCL backend
+gets tested on a machine with no GPU — install [pocl](https://portablecl.org)
+and the whole path, kernel build and device fission included, runs on the CPU.
 
 Oai never links against OpenCL. It loads the runtime by name at start-up
 (`libOpenCL.so.1`, `OpenCL.dll`, …) and resolves the two dozen symbols it

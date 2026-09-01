@@ -70,6 +70,35 @@ jobs:
       - run: make debug
       - run: make test
 
+  opencl:
+    name: OpenCL backend (pocl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # pocl is a CPU OpenCL implementation, so the whole GPU path -- device
+      # discovery, fission, kernel build, dispatch, duty cycling -- runs on a
+      # machine with no GPU.
+      - run: sudo apt-get update && sudo apt-get install -y pocl-opencl-icd ocl-icd-libopencl1
+      - run: make
+      - name: Without the opt-in, a CPU device must be ignored
+        run: ./bin/oai --list-devices | grep -q "no GPU or accelerator"
+      - name: With the opt-in, the device is used and calibrated
+        env:
+          OAI_OPENCL_ALLOW_CPU: "1"
+        run: |
+          ./bin/oai --list-devices | grep -q "compute units"
+          ./bin/oai --no-ui --backend gpu --train --steps 200 --gpu-budget 0.8 \
+                    --sample-every 0 --quiet --checkpoint cl.bin < /dev/null \
+            | tee cl.log
+          grep -q "calibration:" cl.log
+          test -s cl.bin
+      - name: Under --backend auto a slower device must be dropped
+        env:
+          OAI_OPENCL_ALLOW_CPU: "1"
+        run: |
+          ./bin/oai --no-ui --steps 1 --quiet < /dev/null | tee auto.log
+          grep -q "using the CPU" auto.log
+
   cross-windows:
     name: cross-compile Oai.exe
     runs-on: ubuntu-latest

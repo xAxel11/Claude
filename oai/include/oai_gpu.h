@@ -42,6 +42,9 @@ typedef struct {
     double busy_seconds;       /* device time spent inside kernels */
     double idle_seconds;       /* time deliberately yielded to other users */
     long   kernel_calls;
+    int    calibrated;         /* the two figures below are meaningful */
+    float  cal_gpu_ms;         /* measured cost of one step's matmuls, GPU */
+    float  cal_cpu_ms;         /* the same work on the CPU */
     char   status[192];        /* human-readable state, shown in the UI */
 } oai_gpu_info;
 
@@ -62,6 +65,18 @@ void oai_gpu_set_budget(float budget);
  * the bus, otherwise on the CPU. This is the only call the model makes. */
 void oai_gpu_or_cpu_matmul(const float *A, const float *B, float *C,
                            int m, int k, int n);
+
+/* Decides whether the GPU is actually worth using for this model.
+ *
+ * A small model is dominated by the round trip to the device: on a modest card
+ * with the default sizes the CPU is often several times faster, and silently
+ * being slower because a GPU exists is not what "auto" should mean. Call
+ * oai_gpu_calibrate_shape once per matmul shape the model uses, then
+ * oai_gpu_calibrate_finish, which returns 1 if the device was kept and 0 if it
+ * was released in favour of the CPU. `force` (i.e. --backend gpu) keeps the
+ * device either way, and says so. */
+void oai_gpu_calibrate_shape(int m, int k, int n);
+int  oai_gpu_calibrate_finish(int force);
 
 /* Lists devices into `buf` for `oai --list-devices`. */
 void oai_gpu_list_devices(char *buf, size_t buflen);

@@ -4,6 +4,45 @@ All notable changes to Oai are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the version
 numbers follow [semantic versioning](https://semver.org/).
 
+## [1.0.1] - 2026-09-01
+
+### Fixed
+
+- **GPU training was roughly five times slower than it should have been on
+  Windows.** The duty cycle slept after every dispatch, and `Sleep()` cannot
+  wait for less than the system timer tick -- 15.6 ms by default -- so each
+  ~1 ms yield cost a full tick. Two dispatches per step turned a 2 ms yield
+  into ~31 ms. The yield is now accumulated and paid in fewer, longer sleeps,
+  and on Windows it uses a high-resolution waitable timer rather than
+  `Sleep()`, without changing the machine's global timer resolution.
+- The single-sleep cap is now derived from what the dispatch actually owed. A
+  fixed 50 ms cap could not keep up with a slow kernel at a low budget, which
+  would have let occupancy settle well above the requested share.
+- Calibration no longer scales a partitioned device's time by the budget.
+  A device limited by fission pays no duty cycle, so scaling double-counted it.
+- Cross-compiled binaries were stripped with the host `strip`, which silently
+  did nothing. `Oai.exe` drops from 372 KB to 110 KB.
+
+### Added
+
+- **`auto` now measures instead of assuming.** At start-up Oai times the
+  model's real matmul shapes on both the GPU and the CPU, including the duty
+  cycle, and keeps whichever is faster -- a small model on a modest card is
+  usually faster on the CPU. `--backend gpu` overrides it and says plainly
+  that it is the slower choice.
+- `gpu` in the chat box reports measured occupancy against the budget, so the
+  duty cycle can be verified rather than trusted.
+- `OAI_OPENCL_ALLOW_CPU=1` includes CPU OpenCL devices, so the whole OpenCL
+  backend can be exercised on a machine with no GPU (e.g. with pocl). CI now
+  does exactly that.
+
+### Changed
+
+- The device line no longer reads "14/14 compute units, budget 50%", which
+  made a duty-cycled budget look like it was being ignored. It now reads
+  "14 compute units at a 50% duty cycle", and a partitioned device reports the
+  units actually reserved.
+
 ## [1.0.0] - 2026-08-31
 
 The first release.

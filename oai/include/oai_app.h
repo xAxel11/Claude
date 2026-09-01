@@ -36,6 +36,10 @@ void oai_app_free(oai_app *app);
 /* Brings the compute backend up according to cfg.backend and cfg.gpu_budget,
  * logging what it settled on. */
 void oai_app_setup_backend(oai_app *app);
+/* Times the model's real matmul shapes on the GPU and the CPU and keeps
+ * whichever is faster. Runs after the model exists, because it needs its
+ * dimensions. */
+void oai_app_calibrate_backend(oai_app *app);
 
 #ifdef __cplusplus
 }

@@ -272,10 +272,59 @@ double oai_time_now(void)
 #endif
 }
 
+#ifdef OAI_WINDOWS
+/* Sleep() cannot wait for less than the system timer tick, which is 15.6 ms
+ * unless some process has asked for a finer one. A 1 ms yield therefore costs
+ * 15 ms, which was enough on its own to cut GPU training throughput by about
+ * five times. A high-resolution waitable timer (Windows 10 1803 and later)
+ * honours sub-millisecond waits without changing the global timer resolution
+ * for the whole machine, which timeBeginPeriod would.
+ *
+ * One timer per thread, so no locking and no race on first use. */
+#  ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#    define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#  endif
+#  if defined(_MSC_VER)
+#    define OAI_TLS __declspec(thread)
+#  elif defined(__GNUC__)
+#    define OAI_TLS __thread
+#  else
+#    define OAI_TLS            /* no TLS: the fallback path is still correct */
+#  endif
+
+static HANDLE oai_hires_timer(void)
+{
+    static OAI_TLS HANDLE timer;
+    static OAI_TLS int    tried;
+    if (!tried) {
+        tried = 1;
+        timer = CreateWaitableTimerExW(NULL, NULL,
+                                       CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                       TIMER_ALL_ACCESS);
+        if (!timer)   /* older Windows: the flag is rejected */
+            timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
+    }
+    return timer;
+}
+#endif /* OAI_WINDOWS */
+
 void oai_sleep_ms(double ms)
 {
     if (ms <= 0.0) return;
 #ifdef OAI_WINDOWS
+    {
+        HANDLE timer = oai_hires_timer();
+        if (timer) {
+            LARGE_INTEGER due;
+            /* Negative means relative, in 100 ns units. */
+            due.QuadPart = -(LONGLONG)(ms * 10000.0);
+            if (due.QuadPart == 0) due.QuadPart = -1;
+            if (SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) {
+                WaitForSingleObject(timer, INFINITE);
+                return;
+            }
+        }
+    }
     Sleep((DWORD)(ms + 0.5));
 #else
     struct timespec ts;

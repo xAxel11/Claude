@@ -123,7 +123,11 @@ static struct {
 
     float   budget;
     double  busy, idle;
+    double  debt;          /* yield owed but not yet taken, in seconds */
+    double  owed_last;     /* what the most recent dispatch alone owed */
     long    calls;
+    int     calibrating;   /* suppress yielding and stats while measuring */
+    double  cal_gpu, cal_cpu;   /* calibration totals, in seconds */
     oai_mutex *lock;
 
     oai_gpu_info info;
@@ -264,7 +268,23 @@ typedef struct {
     cl_uint      clock_mhz;
 } oai_dev;
 
-/* Collects up to `max` GPU/accelerator devices across every platform. */
+/* Which device types Oai will consider.
+ *
+ * CPU OpenCL devices are excluded: routing work through an OpenCL runtime to
+ * reach the same processor Oai already uses directly is slower, never faster.
+ * Setting OAI_OPENCL_ALLOW_CPU=1 includes them anyway, which is how the
+ * OpenCL path gets exercised on a machine with no GPU -- install pocl and the
+ * whole backend, kernel build and device fission included, runs on the CPU. */
+static cl_device_type wanted_device_types(void)
+{
+    const char *allow = getenv("OAI_OPENCL_ALLOW_CPU");
+    cl_device_type types = CL_DEVICE_TYPE_GPU | CL_DEVICE_TYPE_ACCELERATOR;
+    if (allow && allow[0] && allow[0] != '0')
+        types |= CL_DEVICE_TYPE_CPU;
+    return types;
+}
+
+/* Collects up to `max` usable devices across every platform. */
 static int enumerate_devices(oai_dev *out, int max)
 {
     cl_platform_id platforms[8];
@@ -277,9 +297,7 @@ static int enumerate_devices(oai_dev *out, int max)
     for (p = 0; p < nplat && count < max; ++p) {
         cl_device_id devs[16];
         cl_uint ndev = 0, d;
-        cl_int rc = cl.GetDeviceIDs(platforms[p],
-                                    CL_DEVICE_TYPE_GPU
-                                    | CL_DEVICE_TYPE_ACCELERATOR,
+        cl_int rc = cl.GetDeviceIDs(platforms[p], wanted_device_types(),
                                     16, devs, &ndev);
         if (rc != CL_SUCCESS) continue;
         for (d = 0; d < ndev && count < max; ++d) {
@@ -599,7 +617,7 @@ static int gpu_matmul(const float *A, const float *B, float *C,
     size_t bytes_c = (size_t)m * n * sizeof(float);
     size_t global[2], local[2];
     cl_int rc;
-    double t0, elapsed, yield_ms;
+    double t0, elapsed;
 
     if (bytes_a + bytes_b + bytes_c > G.mem_budget) return -1;
 
@@ -644,35 +662,169 @@ static int gpu_matmul(const float *A, const float *B, float *C,
     cl.Finish(G.queue);
 
     elapsed = oai_time_now() - t0;
+    if (G.calibrating) return 0;
+
     G.busy += elapsed;
     G.calls++;
 
     /* Duty cycle. With a hard partition the driver is already limiting us, so
-     * only the software path needs to yield. Sleeping for
-     * elapsed*(1/budget - 1) makes long-run occupancy approach the budget. */
+     * only the software path needs to yield. Yielding elapsed*(1/budget - 1)
+     * makes long-run occupancy approach the budget.
+     *
+     * The yield is *accumulated* rather than taken after every dispatch. A
+     * single step's matmuls each owe about a millisecond, and a sleep that
+     * short is dominated by the operating system's timer granularity -- on
+     * Windows it used to round up to a 15.6 ms tick and cost five times the
+     * throughput. Paying the debt in fewer, longer sleeps keeps the same
+     * average occupancy and is kinder to the scheduler either way. */
     if (!G.partitioned && G.budget < 0.999f) {
-        yield_ms = elapsed * (1.0 / (double)G.budget - 1.0) * 1000.0;
-        if (yield_ms > 250.0) yield_ms = 250.0;  /* stay responsive */
-        if (yield_ms > 0.02) {
-            oai_sleep_ms(yield_ms);
-            G.idle += yield_ms / 1000.0;
-        }
+        G.owed_last = elapsed * (1.0 / (double)G.budget - 1.0);
+        G.debt += G.owed_last;
+        if (G.debt > 2.0) G.debt = 2.0;   /* do not bank a stall */
     }
     return 0;
+}
+
+/* How much debt is worth a syscall. Below this the sleep costs more in
+ * overhead and rounding than the yield is worth. */
+#define OAI_MIN_YIELD_S 0.002
+/* Floor on how much may be paid off in one sleep. The real cap is whatever
+ * this dispatch alone owed (see yield_cap), because a cap below that can
+ * never keep up: at a 10% budget a 20 ms kernel owes 180 ms, and paying a
+ * fixed 50 ms would let occupancy settle near 29% instead of 10%. */
+#define OAI_MIN_YIELD_CAP_S 0.050
+/* Absolute ceiling, so one sleep cannot make a cancel feel unresponsive.
+ * A kernel slow enough to owe more than this per dispatch will run above its
+ * budget; responsiveness wins that trade. */
+#define OAI_MAX_YIELD_S 0.250
+
+/* The most that may be slept in one go. */
+static double yield_cap(void)
+{
+    double cap = G.owed_last > OAI_MIN_YIELD_CAP_S ? G.owed_last
+                                                   : OAI_MIN_YIELD_CAP_S;
+    return cap > OAI_MAX_YIELD_S ? OAI_MAX_YIELD_S : cap;
 }
 
 void oai_gpu_or_cpu_matmul(const float *A, const float *B, float *C,
                            int m, int k, int n)
 {
-    long work = (long)m * (long)k * (long)n;
+    long   work = (long)m * (long)k * (long)n;
+    int    ok = 0;
+    double yield = 0.0;
 
     if (G.active && work >= OAI_GPU_MIN_WORK) {
-        int ok;
         oai_mutex_lock(G.lock);
         ok = (gpu_matmul(A, B, C, m, k, n) == 0);
+        if (ok && G.debt >= OAI_MIN_YIELD_S) {
+            double cap = yield_cap();
+            yield = G.debt > cap ? cap : G.debt;
+            G.debt -= yield;
+            G.idle += yield;
+        }
         oai_mutex_unlock(G.lock);
+
+        /* Sleep with the lock released -- holding it would block anything
+         * else that wants the device for no reason. */
+        if (yield > 0.0) oai_sleep_ms(yield * 1000.0);
+
         if (ok) return;
         /* A failed dispatch is not fatal: fall through to the CPU. */
     }
     oai_matmul(A, B, C, m, k, n);
+}
+
+/* ============================================================ calibration */
+
+/* Times one shape on both paths.
+ *
+ * When the budget is enforced by duty cycling, the GPU figure is scaled by
+ * 1/budget: that is what a step really costs once the yield is paid, and
+ * comparing raw kernel time would recommend the GPU in cases where it
+ * finishes first but still delivers fewer steps per second. A partitioned
+ * device pays no yield -- its share is already reflected in how long the
+ * kernel takes on fewer compute units -- so its time is used as measured. */
+void oai_gpu_calibrate_shape(int m, int k, int n)
+{
+    float *A, *B, *C;
+    double t0, gpu_t, cpu_t;
+    int    i, reps = 3;
+    size_t na = (size_t)m * k, nb = (size_t)k * n, nc = (size_t)m * n;
+
+    if (!G.active) return;
+
+    A = (float *)malloc(na * sizeof(float));
+    B = (float *)malloc(nb * sizeof(float));
+    C = (float *)malloc(nc * sizeof(float));
+    if (!A || !B || !C) { free(A); free(B); free(C); return; }
+
+    /* Real values, not zeros: the CPU matmul skips zero multipliers, so a
+     * zeroed buffer would time the CPU as far faster than it is. */
+    for (i = 0; i < (int)na; ++i) A[i] = 0.5f + (float)(i % 17) * 0.01f;
+    for (i = 0; i < (int)nb; ++i) B[i] = 0.5f - (float)(i % 13) * 0.01f;
+
+    G.calibrating = 1;
+
+    oai_mutex_lock(G.lock);
+    if (gpu_matmul(A, B, C, m, k, n) != 0) {   /* warm up and check it works */
+        oai_mutex_unlock(G.lock);
+        G.calibrating = 0;
+        free(A); free(B); free(C);
+        return;
+    }
+    t0 = oai_time_now();
+    for (i = 0; i < reps; ++i) gpu_matmul(A, B, C, m, k, n);
+    gpu_t = (oai_time_now() - t0) / reps;
+    oai_mutex_unlock(G.lock);
+
+    G.calibrating = 0;
+
+    oai_matmul(A, B, C, m, k, n);              /* warm up the CPU path too */
+    t0 = oai_time_now();
+    for (i = 0; i < reps; ++i) oai_matmul(A, B, C, m, k, n);
+    cpu_t = (oai_time_now() - t0) / reps;
+
+    if (G.partitioned || G.budget >= 0.999f)
+        G.cal_gpu += gpu_t;
+    else
+        G.cal_gpu += gpu_t / (double)G.budget;
+    G.cal_cpu += cpu_t;
+
+    free(A); free(B); free(C);
+}
+
+int oai_gpu_calibrate_finish(int force)
+{
+    if (!G.active) return 0;
+    if (G.cal_gpu <= 0.0 || G.cal_cpu <= 0.0) return 1;   /* nothing measured */
+
+    G.info.cal_gpu_ms = (float)(G.cal_gpu * 1000.0);
+    G.info.cal_cpu_ms = (float)(G.cal_cpu * 1000.0);
+    G.info.calibrated = 1;
+
+    if (G.cal_gpu <= G.cal_cpu) return 1;                 /* the GPU wins */
+
+    if (force) {
+        snprintf(G.info.status, sizeof G.info.status,
+                 "GPU kept because --backend gpu was given, though it is "
+                 "%.1fx slower than the CPU at this model size",
+                 G.cal_gpu / G.cal_cpu);
+        return 1;
+    }
+
+    {
+        char device[64];          /* trimmed so the whole line fits status[] */
+        float gpu_ms = G.info.cal_gpu_ms, cpu_ms = G.info.cal_cpu_ms;
+        float ratio = (float)(G.cal_gpu / G.cal_cpu);
+        snprintf(device, sizeof device, "%.60s", G.info.device_name);
+        oai_gpu_shutdown();
+        snprintf(G.info.status, sizeof G.info.status,
+                 "%s is %.1fx slower than the CPU at this size "
+                 "(%.2f ms vs %.2f ms per step), so Oai is using the CPU",
+                 device, ratio, gpu_ms, cpu_ms);
+        G.info.calibrated = 1;
+        G.info.cal_gpu_ms = gpu_ms;
+        G.info.cal_cpu_ms = cpu_ms;
+    }
+    return 0;
 }
