@@ -1,0 +1,10 @@
+# Secrets — never commit these
+.env
+*.session.json
+
+# Runtime data
+jarvis_data/
+__pycache__/
+*.pyc
+.venv/
+venv/
