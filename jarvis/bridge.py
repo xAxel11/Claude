@@ -23,8 +23,23 @@ class UIBridge:
         """idle | listening | thinking | speaking"""
         self.post("state", state)
 
-    def show_map(self, lat, lon, label, zoom=12, map_type="road"):
-        self.post("map", lat, lon, label, zoom, map_type)
+    def show_map(self, lat, lon, label, zoom=12, map_type="", clear=True):
+        self.post("map", lat, lon, label, zoom, map_type, clear)
+
+    def add_marker(self, lat, lon, label):
+        self.post("marker", lat, lon, label)
+
+    def draw_route(self, points, label):
+        self.post("route", points, label)
+
+    def clear_map(self):
+        self.post("map_clear")
+
+    def expand_map(self, on):
+        self.post("map_expand", on)
+
+    def show_code(self, title, code):
+        self.post("code", title, code)
 
     def show_image(self, path):
         self.post("image", str(path))

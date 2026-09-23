@@ -24,7 +24,12 @@ def _int_or_none(name):
 
 OS_NAME = platform.system()  # "Windows", "Linux", "Darwin"
 
+# Which AI answers by default: "gemini" or "openai" (switchable in the HUD)
+AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").strip().lower()
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "auto").strip()
 # "auto" picks the best model your key can use and switches when one is busy.
 # Set a model name (e.g. gemini-3-flash-preview) to try that one first.
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "auto").strip()
@@ -51,6 +56,11 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
 IMAP_HOST = os.getenv("IMAP_HOST", "imap.gmail.com")
+
+# Where Jarvis saves code it writes
+CODE_DIR = Path(os.path.expanduser(os.getenv("CODE_DIR", "~/JarvisProjects")))
+# Greet you when the camera sees you come back
+PRESENCE_GREETING = _bool("PRESENCE_GREETING", True)
 
 INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "")
 INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD", "")

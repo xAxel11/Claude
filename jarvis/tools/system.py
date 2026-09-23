@@ -25,7 +25,7 @@ def _screenshot_png():
     import mss
     import mss.tools
 
-    with mss.mss() as sct:
+    with (getattr(mss, "MSS", None) or mss.mss)() as sct:
         shot = sct.grab(sct.monitors[1])
         return mss.tools.to_png(shot.rgb, shot.size), shot.size
 

@@ -60,6 +60,24 @@ class Jarvis:
                 bridge.set_state("idle")
                 self.busy.clear()
 
+    def set_provider(self, name):
+        from . import ai
+
+        try:
+            label = ai.set_provider(name)
+        except ValueError as err:
+            bridge.log(str(err), "system")
+            return False
+        bridge.log(f"AI core switched to {label}.", "system")
+        return True
+
+    def on_presence(self):
+        """Camera saw the user come back after being away."""
+        if config.PRESENCE_GREETING and not self.busy.is_set():
+            msg = f"Welcome back, {config.USER_TITLE}."
+            bridge.log(msg, "jarvis")
+            threading.Thread(target=self.say, args=(msg,), daemon=True).start()
+
     def stop_speaking(self):
         self.voice.stop()
 

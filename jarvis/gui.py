@@ -1,6 +1,7 @@
 """Full-screen Iron-Man style HUD."""
 import datetime
 import math
+import time
 import tkinter as tk
 from tkinter import messagebox
 
@@ -8,28 +9,39 @@ import customtkinter as ctk
 import psutil
 from PIL import Image
 
-from . import config
+from . import ai, config
 from .app import Jarvis
 from .bridge import bridge
-from .camera import get_camera
+from .camera import draw_hud, get_camera
 
 BG = "#050b14"
 PANEL = "#0a1624"
 CYAN = "#3ee6ff"
 DIM = "#1b6f86"
 TEXT = "#c9f6ff"
-STATE_COLORS = {"idle": CYAN, "listening": "#3cff9e", "thinking": "#ffb347", "speaking": "#7fdcff"}
+AMBER = "#ffb347"
+STATE_COLORS = {"idle": CYAN, "listening": "#3cff9e", "thinking": AMBER, "speaking": "#7fdcff"}
 STATE_LABELS = {"idle": "ONLINE", "listening": "LISTENING", "thinking": "PROCESSING", "speaking": "SPEAKING"}
 FONT = "Consolas" if config.OS_NAME == "Windows" else "DejaVu Sans Mono"
+
+MAP_TILES = {
+    "HUD": ("https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png", 19),
+    "Road": ("https://a.tile.openstreetmap.org/{z}/{x}/{y}.png", 19),
+    "Satellite": ("https://mt0.google.com/vt/lyrs=s&hl=en&x={x}&y={y}&z={z}&s=Ga", 22),
+    "Hybrid": ("https://mt0.google.com/vt/lyrs=y&hl=en&x={x}&y={y}&z={z}&s=Ga", 22),
+    "Terrain": ("https://mt0.google.com/vt/lyrs=p&hl=en&x={x}&y={y}&z={z}&s=Ga", 20),
+}
+MARKER_STYLE = dict(marker_color_circle=BG, marker_color_outside=CYAN, text_color=CYAN, font=(FONT, 11, "bold"))
 
 ctk.set_appearance_mode("dark")
 
 
 def panel(parent, title):
     frame = ctk.CTkFrame(parent, fg_color=PANEL, border_color=DIM, border_width=1, corner_radius=8)
-    ctk.CTkLabel(frame, text=title, text_color=CYAN, font=(FONT, 13, "bold"), anchor="w").pack(
-        fill="x", padx=12, pady=(8, 4)
-    )
+    head = ctk.CTkFrame(frame, fg_color="transparent")
+    head.pack(fill="x", padx=12, pady=(8, 4))
+    ctk.CTkLabel(head, text=title, text_color=CYAN, font=(FONT, 13, "bold"), anchor="w").pack(side="left")
+    frame.head = head
     return frame
 
 
@@ -41,8 +53,14 @@ class JarvisGUI(ctk.CTk):
         self.state_name = "idle"
         self.tick = 0
         self.camera_on = False
+        self.map_expanded = False
+        self.map_markers = []
+        self.map_paths = []
         self._camera_img = None
         self._capture_img = None
+        self._code_window = None
+        self._was_present = False
+        self._absent_since = time.time()
 
         self._build_layout()
         self._bind_keys()
@@ -57,7 +75,7 @@ class JarvisGUI(ctk.CTk):
 
     # ================================================================ layout
     def _build_layout(self):
-        self.grid_columnconfigure(0, weight=0, minsize=300)
+        self.grid_columnconfigure(0, weight=0, minsize=320)
         self.grid_columnconfigure(1, weight=1)
         self.grid_columnconfigure(2, weight=0, minsize=460)
         self.grid_rowconfigure(1, weight=1)
@@ -70,6 +88,20 @@ class JarvisGUI(ctk.CTk):
         ).pack(side="left", pady=(8, 0))
         self.clock = ctk.CTkLabel(header, text="", text_color=TEXT, font=(FONT, 22, "bold"))
         self.clock.pack(side="right")
+
+        # AI provider switch
+        ai_box = ctk.CTkFrame(header, fg_color=PANEL, border_color=DIM, border_width=1, corner_radius=8)
+        ai_box.pack(side="right", padx=20)
+        ctk.CTkLabel(ai_box, text="AI CORE", text_color=DIM, font=(FONT, 11, "bold")).pack(side="left", padx=(10, 6))
+        self.ai_switch = ctk.CTkSegmentedButton(
+            ai_box, values=[ai.LABELS[p] for p in ai.PROVIDERS], command=self._on_ai_switch,
+            selected_color="#155a78", selected_hover_color="#1d7699", unselected_color=BG,
+            text_color=TEXT, font=(FONT, 12, "bold"),
+        )
+        self.ai_switch.pack(side="left", pady=6)
+        self.ai_switch.set(ai.LABELS[ai.provider()])
+        self.model_label = ctk.CTkLabel(ai_box, text="", text_color=DIM, font=(FONT, 11), width=190, anchor="w")
+        self.model_label.pack(side="left", padx=10)
 
         self._build_left()
         self._build_center()
@@ -85,7 +117,7 @@ class JarvisGUI(ctk.CTk):
         self.bars = {}
         for name in ("CPU", "MEMORY", "DISK", "BATTERY"):
             row = ctk.CTkFrame(stats, fg_color="transparent")
-            row.pack(fill="x", padx=12, pady=4)
+            row.pack(fill="x", padx=12, pady=3)
             label = ctk.CTkLabel(row, text=f"{name}  --", text_color=TEXT, font=(FONT, 12), anchor="w")
             label.pack(fill="x")
             bar = ctk.CTkProgressBar(row, progress_color=CYAN, fg_color="#10283a", height=8)
@@ -96,28 +128,30 @@ class JarvisGUI(ctk.CTk):
         self.net_label.pack(fill="x", padx=12, pady=(4, 10))
         self._net_last = psutil.net_io_counters()
 
-        cam = panel(left, "OPTICAL SENSOR")
+        cam = panel(left, "OPTICAL SENSORS")
         cam.pack(fill="both", expand=True, pady=(10, 0))
         self.cam_switch = ctk.CTkSwitch(
-            cam, text="Camera", text_color=TEXT, progress_color=CYAN, command=self._toggle_camera_switch
+            cam.head, text="", width=40, progress_color=CYAN, command=self._toggle_camera_switch
         )
-        self.cam_switch.pack(anchor="w", padx=12)
-        self.cam_view = ctk.CTkLabel(cam, text="camera offline", text_color=DIM, font=(FONT, 11))
-        self.cam_view.pack(fill="both", expand=True, padx=8, pady=8)
+        self.cam_switch.pack(side="right")
+        self.cam_view = ctk.CTkLabel(cam, text="sensors offline", text_color=DIM, font=(FONT, 11))
+        self.cam_view.pack(fill="x", padx=8, pady=(4, 4))
+        self.sensor_label = ctk.CTkLabel(cam, text="", text_color=TEXT, font=(FONT, 11), anchor="w", justify="left")
+        self.sensor_label.pack(fill="x", padx=12, pady=(0, 8))
 
     def _build_center(self):
-        center = ctk.CTkFrame(self, fg_color="transparent")
-        center.grid(row=1, column=1, sticky="nsew", padx=8, pady=10)
-        center.grid_rowconfigure(0, weight=3)
-        center.grid_rowconfigure(2, weight=2)
-        center.grid_columnconfigure(0, weight=1)
+        self.center = ctk.CTkFrame(self, fg_color="transparent")
+        self.center.grid(row=1, column=1, sticky="nsew", padx=8, pady=10)
+        self.center.grid_rowconfigure(0, weight=3)
+        self.center.grid_rowconfigure(2, weight=2)
+        self.center.grid_columnconfigure(0, weight=1)
 
-        self.canvas = tk.Canvas(center, bg=BG, highlightthickness=0)
+        self.canvas = tk.Canvas(self.center, bg=BG, highlightthickness=0)
         self.canvas.grid(row=0, column=0, sticky="nsew")
-        self.status = ctk.CTkLabel(center, text="ONLINE", text_color=CYAN, font=(FONT, 16, "bold"))
+        self.status = ctk.CTkLabel(self.center, text="ONLINE", text_color=CYAN, font=(FONT, 16, "bold"))
         self.status.grid(row=1, column=0, pady=4)
 
-        log_panel = panel(center, "COMMUNICATIONS LOG")
+        log_panel = panel(self.center, "COMMUNICATIONS LOG")
         log_panel.grid(row=2, column=0, sticky="nsew")
         self.log = ctk.CTkTextbox(
             log_panel, fg_color=BG, text_color=TEXT, font=(FONT, 14), wrap="word", border_width=0
@@ -126,36 +160,40 @@ class JarvisGUI(ctk.CTk):
         self.log.tag_config("you", foreground="#ffffff")
         self.log.tag_config("jarvis", foreground=CYAN)
         self.log.tag_config("tool", foreground="#6b8ea0")
-        self.log.tag_config("system", foreground="#ffb347")
+        self.log.tag_config("system", foreground=AMBER)
         self.log.configure(state="disabled")
 
     def _build_right(self):
-        right = ctk.CTkFrame(self, fg_color="transparent")
-        right.grid(row=1, column=2, sticky="nsew", padx=(8, 16), pady=10)
+        self.right = ctk.CTkFrame(self, fg_color="transparent")
+        self.right.grid(row=1, column=2, sticky="nsew", padx=(8, 16), pady=10)
 
-        map_panel = panel(right, "GLOBAL POSITIONING")
+        map_panel = panel(self.right, "GLOBAL POSITIONING")
         map_panel.pack(fill="both", expand=True)
+        small = dict(width=30, height=24, fg_color="#0f3346", hover_color="#155a78", text_color=TEXT, font=(FONT, 12))
+        ctk.CTkButton(map_panel.head, text="⛶", command=lambda: self.expand_map(not self.map_expanded), **small).pack(
+            side="right", padx=2)
+        ctk.CTkButton(map_panel.head, text="✕", command=self.clear_map, **small).pack(side="right", padx=2)
         self.map = None
         try:
             import tkintermapview
 
-            self.map = tkintermapview.TkinterMapView(map_panel, corner_radius=6)
+            self.map = tkintermapview.TkinterMapView(map_panel, corner_radius=6, bg_color=PANEL)
             self.map.pack(fill="both", expand=True, padx=8)
-            self.map.set_position(51.5074, -0.1278)  # London until asked otherwise
-            self.map.set_zoom(4)
-            toggle = ctk.CTkSegmentedButton(
-                map_panel, values=["road", "satellite"], command=self._set_map_type,
-                selected_color=DIM, text_color=TEXT,
+            self.map.canvas.configure(bg="#0b0f14")  # dark while tiles load
+            self.map_toggle = ctk.CTkSegmentedButton(
+                map_panel, values=list(MAP_TILES), command=self._set_map_type,
+                selected_color="#155a78", unselected_color=BG, text_color=TEXT, font=(FONT, 11),
             )
-            toggle.set("road")
-            toggle.pack(pady=6)
-            self.map_toggle = toggle
+            self.map_toggle.pack(pady=6)
+            self._set_map_type("HUD")
+            self.map.set_position(51.5074, -0.1278)  # London until asked otherwise
+            self.map.set_zoom(3)
         except Exception as err:  # noqa: BLE001
             ctk.CTkLabel(map_panel, text=f"map unavailable: {err}", text_color=DIM).pack(expand=True)
 
-        cap = panel(right, "LAST CAPTURE")
-        cap.pack(fill="x", pady=(10, 0))
-        self.capture_view = ctk.CTkLabel(cap, text="no captures yet", text_color=DIM, height=180)
+        self.capture_panel = panel(self.right, "LAST CAPTURE")
+        self.capture_panel.pack(fill="x", pady=(10, 0))
+        self.capture_view = ctk.CTkLabel(self.capture_panel, text="no captures yet", text_color=DIM, height=160)
         self.capture_view.pack(fill="x", padx=8, pady=(0, 8))
 
     def _build_input_bar(self):
@@ -207,6 +245,12 @@ class JarvisGUI(ctk.CTk):
         get_camera().stop()
         self.destroy()
 
+    def _on_ai_switch(self, label):
+        name = {v: k for k, v in ai.LABELS.items()}[label]
+        if not self.jarvis.set_provider(name):
+            self.ai_switch.set(ai.LABELS[ai.provider()])
+
+    # ---------------------------------------------------------------- camera
     def _toggle_camera_switch(self):
         self._set_camera(bool(self.cam_switch.get()))
 
@@ -217,7 +261,8 @@ class JarvisGUI(ctk.CTk):
             on = False
         if not on:
             cam.stop()
-            self.cam_view.configure(image=None, text="camera offline")
+            self.cam_view.configure(image=None, text="sensors offline")
+            self.sensor_label.configure(text="")
         self.camera_on = on
         self.cam_switch.select() if on else self.cam_switch.deselect()
         if on:
@@ -226,43 +271,168 @@ class JarvisGUI(ctk.CTk):
     def _update_camera(self):
         if not self.camera_on:
             return
-        frame = get_camera().latest_frame()
+        cam = get_camera()
+        frame = cam.latest_frame()
         if frame is not None:
             import cv2
 
+            frame = draw_hud(frame, cam.sensors, self.tick)
             img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             w = max(self.cam_view.winfo_width() - 8, 200)
             h = int(w * img.height / img.width)
             self._camera_img = ctk.CTkImage(img, size=(w, h))
             self.cam_view.configure(image=self._camera_img, text="")
+            self._update_sensors(cam.sensors)
         self.after(50, self._update_camera)
 
+    def _update_sensors(self, s):
+        faces = s.get("faces", [])
+        dist = f"  ·  {faces[0]['distance_m']:.1f} m" if faces else ""
+        present = bool(faces)
+        self.sensor_label.configure(
+            text=f"SUBJECTS {len(faces)}{dist}\nMOTION {s.get('motion', 0):.0f}%   LIGHT {s.get('light', 0):.0f}%"
+        )
+        now = time.time()
+        if present and not self._was_present and now - self._absent_since > 120:
+            self.jarvis.on_presence()
+        if not present and self._was_present:
+            self._absent_since = now
+        if present:
+            self._was_present = True
+        elif s.get("present_since") is None:
+            self._was_present = False
+
+    # ---------------------------------------------------------------- map
     def _set_map_type(self, kind):
         if not self.map:
             return
-        if kind == "satellite":
-            self.map.set_tile_server("https://mt0.google.com/vt/lyrs=s&hl=en&x={x}&y={y}&z={z}&s=Ga", max_zoom=22)
-        else:
-            self.map.set_tile_server("https://a.tile.openstreetmap.org/{z}/{x}/{y}.png")
+        kind = {k.lower(): k for k in MAP_TILES}.get(kind.lower(), "HUD")
+        url, max_zoom = MAP_TILES[kind]
+        self.map.set_tile_server(url, max_zoom=max_zoom)
+        self.map_toggle.set(kind)
 
-    def show_map(self, lat, lon, label, zoom, map_type):
+    def show_map(self, lat, lon, label, zoom, map_type, clear):
         if not self.map:
             return
-        self._set_map_type(map_type)
-        self.map_toggle.set(map_type if map_type in ("road", "satellite") else "road")
-        self.map.delete_all_marker()
-        self.map.set_position(lat, lon, marker=True, text=label)
+        if map_type:
+            self._set_map_type(map_type)
+        if clear:
+            self.clear_map()
+        self.map.set_position(lat, lon)
         self.map.set_zoom(zoom)
+        self.add_marker(lat, lon, label)
 
+    def add_marker(self, lat, lon, label):
+        if self.map:
+            self.map_markers.append(self.map.set_marker(lat, lon, text=label, **MARKER_STYLE))
+
+    def draw_route(self, points, label):
+        if not self.map or len(points) < 2:
+            return
+        self.clear_map()
+        self.map_paths.append(self.map.set_path(points, color=CYAN, width=4))
+        self.add_marker(*points[0], "START")
+        self.add_marker(*points[-1], label.upper())
+        lats = [p[0] for p in points]
+        lons = [p[1] for p in points]
+        pad_lat = (max(lats) - min(lats)) * 0.15 + 0.002
+        pad_lon = (max(lons) - min(lons)) * 0.15 + 0.002
+        self.map.fit_bounding_box((max(lats) + pad_lat, min(lons) - pad_lon), (min(lats) - pad_lat, max(lons) + pad_lon))
+
+    def clear_map(self):
+        if not self.map:
+            return
+        for m in self.map_markers:
+            m.delete()
+        for p in self.map_paths:
+            p.delete()
+        self.map_markers, self.map_paths = [], []
+
+    def expand_map(self, on):
+        """Swap the map into the big centre area (and back)."""
+        self.map_expanded = on
+        if on:
+            self.right.grid_configure(column=1, columnspan=2)
+            self.center.grid_remove()
+            self.capture_panel.pack_forget()
+        else:
+            self.right.grid_configure(column=2, columnspan=1)
+            self.center.grid()
+            self.capture_panel.pack(fill="x", pady=(10, 0))
+
+    def _draw_map_overlay(self):
+        """Holographic HUD overlay drawn on top of the map tiles."""
+        if not self.map:
+            return
+        c = self.map.canvas
+        c.delete("hud")
+        w, h = c.winfo_width(), c.winfo_height()
+        if w < 50:
+            return
+        cx, cy = w / 2, h / 2
+        col = CYAN
+        # corner brackets
+        L = 22
+        for (x, y, dx, dy) in ((6, 6, 1, 1), (w - 6, 6, -1, 1), (6, h - 6, 1, -1), (w - 6, h - 6, -1, -1)):
+            c.create_line(x, y, x + dx * L, y, fill=col, width=2, tags="hud")
+            c.create_line(x, y, x, y + dy * L, fill=col, width=2, tags="hud")
+        # centre reticle
+        r = 16
+        c.create_oval(cx - r, cy - r, cx + r, cy + r, outline=col, width=1, tags="hud")
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            c.create_line(cx + dx * (r - 6), cy + dy * (r - 6), cx + dx * (r + 10), cy + dy * (r + 10),
+                          fill=col, width=1, tags="hud")
+        # radar sweep: a fading wedge behind a bright leading edge
+        R = min(w, h) * 0.45
+        deg = (self.tick * 3) % 360
+        for k, shade in enumerate(("#0d4a5c", "#0a3947", "#082a35")):
+            c.create_arc(cx - R, cy - R, cx + R, cy + R, start=-deg + 8 * k, extent=8, style="pieslice",
+                         outline="", fill=shade, tags="hud")
+        a = math.radians(deg)
+        c.create_line(cx, cy, cx + R * math.cos(a), cy + R * math.sin(a), fill=col, width=2, tags="hud")
+        c.create_oval(cx - R, cy - R, cx + R, cy + R, outline=DIM, dash=(2, 6), tags="hud")
+        c.create_oval(cx - R / 2, cy - R / 2, cx + R / 2, cy + R / 2, outline=DIM, dash=(2, 6), tags="hud")
+        # readouts
+        lat, lon = self.map.get_position()
+        ns, ew = ("N" if lat >= 0 else "S"), ("E" if lon >= 0 else "W")
+        c.create_rectangle(8, h - 30, 330, h - 8, fill=BG, outline=DIM, tags="hud")
+        c.create_text(16, h - 19, anchor="w", fill=col, font=(FONT, 10, "bold"), tags="hud",
+                      text=f"LAT {abs(lat):8.4f}°{ns}   LON {abs(lon):8.4f}°{ew}   Z{int(self.map.zoom)}")
+        blink = "●" if (self.tick // 15) % 2 else "○"
+        c.create_text(w - 14, 18, anchor="e", fill=col, font=(FONT, 10, "bold"), tags="hud",
+                      text=f"{blink} GEO-TRACK ACTIVE   PINS {len(self.map_markers)}")
+        c.tag_raise("hud")
+
+    # ---------------------------------------------------------------- misc views
     def show_image(self, path):
         try:
             img = Image.open(path)
         except OSError:
             return
         w = max(self.capture_view.winfo_width() - 8, 300)
-        h = min(int(w * img.height / img.width), 260)
+        h = min(int(w * img.height / img.width), 240)
         self._capture_img = ctk.CTkImage(img, size=(int(h * img.width / img.height), h))
         self.capture_view.configure(image=self._capture_img, text="")
+
+    def show_code(self, title, code):
+        win = self._code_window
+        if win is None or not win.winfo_exists():
+            win = ctk.CTkToplevel(self, fg_color=BG)
+            win.geometry("900x650")
+            win.attributes("-topmost", True)
+            win.header = ctk.CTkLabel(win, text="", text_color=CYAN, font=(FONT, 13, "bold"), anchor="w")
+            win.header.pack(fill="x", padx=12, pady=(10, 0))
+            win.text = ctk.CTkTextbox(win, fg_color=PANEL, text_color=TEXT, font=(FONT, 13), wrap="none",
+                                      border_color=DIM, border_width=1)
+            win.text.pack(fill="both", expand=True, padx=10, pady=10)
+            self._code_window = win
+        win.title(f"J.A.R.V.I.S. — {title}")
+        win.header.configure(text=f"CODE  ›  {title}")
+        win.text.configure(state="normal")
+        win.text.delete("1.0", "end")
+        win.text.insert("1.0", code)
+        win.text.configure(state="disabled")
+        win.lift()
 
     def append_log(self, text, who):
         prefix = {"you": "YOU  › ", "jarvis": "JARVIS › ", "tool": "  ⚙ ", "system": "  ! "}.get(who, "")
@@ -278,35 +448,44 @@ class JarvisGUI(ctk.CTk):
 
     # ================================================================ loops
     def _drain_bridge(self):
+        handlers = {
+            "log": lambda who, text: self.append_log(text, who),
+            "state": self.set_state,
+            "map": self.show_map,
+            "marker": self.add_marker,
+            "route": self.draw_route,
+            "map_clear": self.clear_map,
+            "map_expand": self.expand_map,
+            "image": self.show_image,
+            "code": self.show_code,
+            "camera": self._set_camera,
+            "provider": lambda name: self.ai_switch.set(ai.LABELS[name]),
+        }
         while not bridge.queue.empty():
             kind, args = bridge.queue.get_nowait()
-            if kind == "log":
-                self.append_log(args[1], args[0])
-            elif kind == "state":
-                self.set_state(args[0])
-            elif kind == "map":
-                self.show_map(*args)
-            elif kind == "image":
-                self.show_image(args[0])
-            elif kind == "camera":
-                self._set_camera(args[0])
-            elif kind == "clipboard":
-                self.clipboard_clear()
-                self.clipboard_append(args[0])
-                self.update()
-                args[1].set()
-            elif kind == "confirm":
-                message, done, result = args
-                result["ok"] = messagebox.askyesno("J.A.R.V.I.S. — confirm action", message, parent=self)
-                done.set()
+            try:
+                if kind == "clipboard":
+                    self.clipboard_clear()
+                    self.clipboard_append(args[0])
+                    self.update()
+                    args[1].set()
+                elif kind == "confirm":
+                    message, done, result = args
+                    result["ok"] = messagebox.askyesno("J.A.R.V.I.S. — confirm action", message, parent=self)
+                    done.set()
+                elif kind in handlers:
+                    handlers[kind](*args)
+            except Exception as err:  # noqa: BLE001  (never let one bad message kill the HUD)
+                self.append_log(f"display error ({kind}): {err}", "system")
         self.after(50, self._drain_bridge)
 
     def _update_stats(self):
         self.clock.configure(text=datetime.datetime.now().strftime("%H:%M:%S   %a %d %b %Y"))
+        self.model_label.configure(text=f"model: {ai.current_model()}")
         values = {
             "CPU": psutil.cpu_percent(),
             "MEMORY": psutil.virtual_memory().percent,
-            "DISK": psutil.disk_usage("/").percent if config.OS_NAME != "Windows" else psutil.disk_usage("C:\\").percent,
+            "DISK": psutil.disk_usage("C:\\" if config.OS_NAME == "Windows" else "/").percent,
         }
         battery = psutil.sensors_battery()
         values["BATTERY"] = battery.percent if battery else None
@@ -325,25 +504,28 @@ class JarvisGUI(ctk.CTk):
         self.after(1000, self._update_stats)
 
     def _animate(self):
+        self.tick += 1
+        if self.map and self.tick % 2 == 0:
+            self._draw_map_overlay()
+        if self.map_expanded:
+            self.after(33, self._animate)
+            return
         c = self.canvas
         c.delete("all")
         w, h = c.winfo_width(), c.winfo_height()
         cx, cy = w / 2, h / 2
         R = max(min(w, h) * 0.44, 40)
         t = self.tick
-        self.tick += 1
         color = STATE_COLORS.get(self.state_name, CYAN)
         speed = {"idle": 0.6, "listening": 1.5, "thinking": 3.5, "speaking": 1.2}.get(self.state_name, 1)
 
-        # outer tick ring
-        for i in range(72):
+        for i in range(72):  # outer tick ring
             a = math.radians(i * 5 + t * 0.2 * speed)
             inner = R * (0.93 if i % 6 else 0.88)
             c.create_line(cx + inner * math.cos(a), cy + inner * math.sin(a),
                           cx + R * math.cos(a), cy + R * math.sin(a), fill=DIM, width=2)
         c.create_oval(cx - R * 1.02, cy - R * 1.02, cx + R * 1.02, cy + R * 1.02, outline=DIM, width=1)
 
-        # rotating arc segments
         for i, (radius, extent, width) in enumerate([(0.80, 70, 4), (0.68, 110, 3), (0.56, 50, 6), (0.45, 140, 2)]):
             r = R * radius
             direction = 1 if i % 2 == 0 else -1
@@ -352,7 +534,6 @@ class JarvisGUI(ctk.CTk):
                 c.create_arc(cx - r, cy - r, cx + r, cy + r, start=start, extent=extent,
                              style="arc", outline=color, width=width)
 
-        # pulsing core
         amp = 0.18 if self.state_name == "speaking" else 0.10 if self.state_name == "listening" else 0.04
         pulse = 1 + amp * math.sin(t / (3 if self.state_name == "speaking" else 8))
         core = R * 0.30 * pulse
@@ -360,5 +541,7 @@ class JarvisGUI(ctk.CTk):
             rr = core * (1 - j * 0.28)
             c.create_oval(cx - rr, cy - rr, cx + rr, cy + rr, outline=color, width=2,
                           fill=shade if j < 2 else "")
-        c.create_text(cx, cy, text="J.A.R.V.I.S", fill=TEXT, font=(FONT, max(int(R * 0.07), 9), "bold"))
+        c.create_text(cx, cy - R * 0.02, text="J.A.R.V.I.S", fill=TEXT, font=(FONT, max(int(R * 0.05), 8), "bold"))
+        c.create_text(cx, cy + R * 0.09, text=ai.LABELS[ai.provider()].upper(), fill=DIM,
+                      font=(FONT, max(int(R * 0.045), 8)))
         self.after(33, self._animate)

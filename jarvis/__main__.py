@@ -1,14 +1,15 @@
 import sys
 
-from . import config
 
 
 def main():
-    if not config.GEMINI_API_KEY or config.GEMINI_API_KEY.startswith("paste-"):
+    from . import ai
+
+    if not ai.configured():
         print(
-            "No Gemini API key found.\n"
-            "Copy .env.example to .env and set GEMINI_API_KEY "
-            "(free key: https://aistudio.google.com/apikey)."
+            "No AI API key found.\n"
+            "Copy .env.example to .env and set GEMINI_API_KEY (free: https://aistudio.google.com/apikey)\n"
+            "and/or OPENAI_API_KEY (https://platform.openai.com/api-keys)."
         )
         sys.exit(1)
 

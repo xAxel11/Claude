@@ -44,7 +44,10 @@ class Voice:
             self._speak_edge(text)
         except Exception as err:  # noqa: BLE001
             print(f"[voice] edge-tts failed ({err}); using offline voice")
-            self._speak_offline(text)
+            try:
+                self._speak_offline(text)
+            except Exception as err2:  # noqa: BLE001
+                print(f"[voice] offline voice failed too ({err2})")
 
     def _speak_edge(self, text):
         import edge_tts

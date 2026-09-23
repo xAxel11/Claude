@@ -58,4 +58,12 @@ def set_timer(minutes: float, message: str = "Your timer is up.") -> str:
     return f"Timer set for {minutes:g} minute(s)."
 
 
-TOOLS = [remember, forget, get_current_datetime, set_timer]
+@tool
+def switch_ai_provider(provider: str) -> str:
+    """Switch which AI powers Jarvis from the next request on: 'gemini' or 'chatgpt'."""
+    from .. import ai
+
+    return f"Switched to {ai.set_provider(provider)}. The change applies from the next request."
+
+
+TOOLS = [remember, forget, get_current_datetime, set_timer, switch_ai_provider]

@@ -7,6 +7,8 @@ from .. import ai
 from ..bridge import bridge
 from ._base import tool
 
+UA = {"User-Agent": "jarvis-desktop-assistant"}
+
 
 @tool
 def web_search(query: str) -> str:
@@ -31,7 +33,7 @@ def _geocode(place):
     r = requests.get(
         "https://nominatim.openstreetmap.org/search",
         params={"q": place, "format": "json", "limit": 1},
-        headers={"User-Agent": "jarvis-desktop-assistant"},
+        headers=UA,
         timeout=10,
     )
     results = r.json()
@@ -42,9 +44,9 @@ def _geocode(place):
 
 
 @tool
-def show_map(location: str, zoom: int = 12, map_type: str = "road") -> str:
-    """Show a place on the HUD's map panel. zoom: 3 (continent) to 18 (street).
-    map_type: 'road' or 'satellite'."""
+def show_map(location: str, zoom: int = 12, map_type: str = "") -> str:
+    """Show a place on the HUD map. zoom: 3 (continent) to 18 (street).
+    map_type (optional): 'hud' (dark holographic), 'road', 'satellite', 'hybrid' or 'terrain'."""
     found = _geocode(location)
     if not found:
         return f"Couldn't find {location} on the map."
@@ -54,17 +56,85 @@ def show_map(location: str, zoom: int = 12, map_type: str = "road") -> str:
 
 
 @tool
-def get_directions(origin: str, destination: str, mode: str = "driving") -> str:
-    """Open turn-by-turn directions in Google Maps. mode: driving, walking, transit or bicycling."""
-    url = (
-        "https://www.google.com/maps/dir/?api=1"
-        f"&origin={quote_plus(origin)}&destination={quote_plus(destination)}&travelmode={mode}"
-    )
-    webbrowser.open(url)
+def add_map_marker(location: str, label: str = "") -> str:
+    """Pin an extra place on the map without clearing existing pins."""
+    found = _geocode(location)
+    if not found:
+        return f"Couldn't find {location}."
+    bridge.add_marker(found[0], found[1], label or location)
+    return f"Pinned {found[2]}."
+
+
+@tool
+def clear_map() -> str:
+    """Remove all pins and routes from the map."""
+    bridge.clear_map()
+    return "Map cleared."
+
+
+@tool
+def expand_map(on: bool = True) -> str:
+    """Make the map take over the big centre area (on=True) or shrink it back (on=False)."""
+    bridge.expand_map(on)
+    return "Map expanded." if on else "Map restored."
+
+
+def _ip_location():
+    data = requests.get("https://ipinfo.io/json", headers=UA, timeout=10).json()
+    lat, lon = (float(v) for v in data["loc"].split(","))
+    return lat, lon, f"{data.get('city', '')}, {data.get('country', '')}".strip(", ")
+
+
+@tool
+def where_am_i() -> str:
+    """Find the user's approximate location (from their internet connection) and show it on the map."""
+    lat, lon, name = _ip_location()
+    bridge.show_map(lat, lon, "YOU ARE HERE", 12, "")
+    return f"You appear to be near {name} ({lat:.3f}, {lon:.3f})."
+
+
+@tool
+def get_directions(destination: str, origin: str = "here", mode: str = "driving",
+                   open_google_maps: bool = False) -> str:
+    """Plot a route on the HUD map and report distance and travel time.
+    origin 'here' = the user's current location. mode: driving, walking or cycling.
+    Set open_google_maps=True to also open turn-by-turn directions in the browser."""
+    if origin.lower() in ("here", "my location", "current location", ""):
+        o_lat, o_lon, o_name = _ip_location()
+    else:
+        found = _geocode(origin)
+        if not found:
+            return f"Couldn't find {origin}."
+        o_lat, o_lon, o_name = found
     found = _geocode(destination)
-    if found:
-        bridge.show_map(found[0], found[1], destination, 12, "road")
-    return f"Opened {mode} directions from {origin} to {destination} in the browser."
+    if not found:
+        return f"Couldn't find {destination}."
+    d_lat, d_lon, _ = found
+    profile = {"walking": "foot", "cycling": "bike", "bicycling": "bike"}.get(mode, "driving")
+    summary = ""
+    try:
+        r = requests.get(
+            f"https://router.project-osrm.org/route/v1/{profile}/{o_lon},{o_lat};{d_lon},{d_lat}",
+            params={"overview": "full", "geometries": "geojson"},
+            headers=UA,
+            timeout=15,
+        ).json()
+        route = r["routes"][0]
+        points = [(lat, lon) for lon, lat in route["geometry"]["coordinates"]]
+        bridge.draw_route(points, destination)
+        km = route["distance"] / 1000
+        minutes = route["duration"] / 60
+        summary = f"Route plotted: {km:.1f} km, about {minutes:.0f} minutes {mode}."
+    except Exception:  # noqa: BLE001  (routing server down or no road route)
+        bridge.draw_route([(o_lat, o_lon), (d_lat, d_lon)], destination)
+        summary = "Couldn't get a road route, so I've drawn a straight line."
+    if open_google_maps:
+        mode_g = {"cycling": "bicycling"}.get(mode, mode)
+        webbrowser.open(
+            "https://www.google.com/maps/dir/?api=1"
+            f"&origin={o_lat},{o_lon}&destination={quote_plus(destination)}&travelmode={mode_g}"
+        )
+    return f"From {o_name} to {destination}. {summary}"
 
 
-TOOLS = [web_search, get_weather, show_map, get_directions]
+TOOLS = [web_search, get_weather, show_map, add_map_marker, clear_map, expand_map, where_am_i, get_directions]
