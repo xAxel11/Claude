@@ -96,10 +96,17 @@ in once on your phone first. Jarvis asks you before every post or DM.
 
 ## Models
 
-Jarvis uses `GEMINI_MODEL` (default `gemini-3.5-flash`). If that model is retired,
-overloaded or rate-limited, it moves on to the next model in `FALLBACK_MODELS` in
-`jarvis/config.py`. The free tier has per-minute limits, so if you send a burst of commands
-Jarvis tells you to wait a moment.
+With `GEMINI_MODEL=auto` (the default), Jarvis asks Google which models your key can use and
+tries the fastest, most reliable ones first (`PREFERRED_MODELS` in `jarvis/ai.py`). When a model
+is overloaded, rate-limited, retired or slow, Jarvis:
+
+- moves on to the next model right away and parks the failed one for a minute or two;
+- starts a backup model if the current one hasn't answered within `GEMINI_HEDGE_SECONDS`
+  (default 8), and uses whichever answers first;
+- keeps the conversation when switching, and runs each tool exactly once, so a model switch
+  never repeats a click, an email or a post.
+
+The HUD log shows each switch. To try a particular model first, set `GEMINI_MODEL` to its name.
 
 ## Project layout
 

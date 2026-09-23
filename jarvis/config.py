@@ -25,9 +25,13 @@ def _int_or_none(name):
 OS_NAME = platform.system()  # "Windows", "Linux", "Darwin"
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash").strip()
-# Tried in order if the model above is retired, overloaded or rate-limited.
-FALLBACK_MODELS = ["gemini-flash-latest", "gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite"]
+# "auto" picks the best model your key can use and switches when one is busy.
+# Set a model name (e.g. gemini-3-flash-preview) to try that one first.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "auto").strip()
+# Seconds to wait for a model before switching to another one.
+REQUEST_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "40"))
+# If a model is silent this long, a backup model is asked too and the fastest answer wins.
+HEDGE_SECONDS = float(os.getenv("GEMINI_HEDGE_SECONDS", "8"))
 
 VOICE = os.getenv("JARVIS_VOICE", "en-GB-RyanNeural")
 VOICE_RATE = os.getenv("JARVIS_VOICE_RATE", "+5%")
