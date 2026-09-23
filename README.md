@@ -25,7 +25,15 @@ The HUD shows an animated arc reactor (colour shows state: cyan idle, green list
 thinking), live CPU, RAM, disk, battery and network stats, the webcam feed, a map, the last
 screenshot or photo, and a log of everything Jarvis says and does.
 
-## Setup
+## Windows quick start
+
+1. Install Python 3.10+ from https://www.python.org/downloads/ and tick **"Add python.exe to PATH"**.
+2. Double-click **`Jarvis.bat`**. The first run installs everything, which takes a few minutes.
+3. Notepad opens `.env`. Paste your Gemini key after `GEMINI_API_KEY=`, save, and close Notepad. Jarvis then starts.
+
+If packages ever break, run `Reinstall.bat`.
+
+## Setup (manual / Linux / macOS)
 
 Needs Python 3.10 or newer.
 
