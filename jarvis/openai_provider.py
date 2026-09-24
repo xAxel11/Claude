@@ -78,7 +78,7 @@ pool = ModelPool(
 )
 
 
-def vision(prompt, image_bytes, mime_type="image/png", json_mode=False):
+def vision(prompt, image_bytes, mime_type="image/png", json_mode=False, fast=False):
     url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
     messages = [{"role": "user", "content": [
         {"type": "text", "text": prompt},
@@ -111,7 +111,12 @@ class Session:
                 self.history = self.history[i:]
                 return
 
-    def ask(self, text, max_steps=25):
+    def _drop_old_images(self):
+        for m in self.history:
+            if isinstance(m.get("content"), list):
+                m["content"] = "[earlier screenshot removed]"
+
+    def ask(self, text, max_steps=30, observe=None):
         self._trim()
         start = len(self.history)
         self.history.append({"role": "user", "content": text})
@@ -135,6 +140,14 @@ class Session:
                         args = {}
                     result = self.execute(tc.function.name, args)
                     self.history.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
+                image = observe([tc.function.name for tc in msg.tool_calls]) if observe else None
+                if image:
+                    self._drop_old_images()
+                    url = f"data:image/jpeg;base64,{base64.b64encode(image).decode()}"
+                    self.history.append({"role": "user", "content": [
+                        {"type": "text", "text": "Screenshot of the screen after these actions:"},
+                        {"type": "image_url", "image_url": {"url": url}},
+                    ]})
             return f"That took more steps than I'm allowed, {config.USER_TITLE}. I've stopped here."
         except Exception:
             del self.history[start:]

@@ -1,9 +1,9 @@
 """Full-screen Iron-Man style HUD."""
 import datetime
 import math
+import os
 import time
 import tkinter as tk
-from tkinter import messagebox
 
 import customtkinter as ctk
 import psutil
@@ -36,6 +36,34 @@ MARKER_STYLE = dict(marker_color_circle=BG, marker_color_outside=CYAN, text_colo
 ctk.set_appearance_mode("dark")
 
 
+def _hwnd(win):
+    import ctypes
+
+    return ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id()
+
+
+def _set_exstyle(win, flags):
+    if config.OS_NAME != "Windows":
+        return
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        hwnd = _hwnd(win)
+        style = user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
+        user32.SetWindowLongW(hwnd, -20, style | flags)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _click_through(win):
+    _set_exstyle(win, 0x00080000 | 0x00000020)  # WS_EX_LAYERED | WS_EX_TRANSPARENT
+
+
+def _no_activate(win):
+    _set_exstyle(win, 0x08000000 | 0x00000080)  # WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
+
+
 def panel(parent, title):
     frame = ctk.CTkFrame(parent, fg_color=PANEL, border_color=DIM, border_width=1, corner_radius=8)
     head = ctk.CTkFrame(frame, fg_color="transparent")
@@ -61,6 +89,12 @@ class JarvisGUI(ctk.CTk):
         self._code_window = None
         self._was_present = False
         self._absent_since = time.time()
+        self.mini = False
+        self._pill = None
+        self._was_fullscreen = config.START_FULLSCREEN
+        self._last_foreign_hwnd = None
+        self._last_reply = ""
+        bridge.gui_attached = True
 
         self._build_layout()
         self._bind_keys()
@@ -72,6 +106,8 @@ class JarvisGUI(ctk.CTk):
         self.after(50, self._drain_bridge)
         self.after(500, self._update_stats)
         self.after(800, self.jarvis.greet)
+        if config.OS_NAME == "Windows":
+            self.after(300, self._track_foreground)
 
     # ================================================================ layout
     def _build_layout(self):
@@ -230,6 +266,7 @@ class JarvisGUI(ctk.CTk):
         self.bind("<Escape>", lambda _e: self.attributes("-fullscreen", False))
         self.bind("<Control-q>", lambda _e: self._quit())
         self.bind("<Control-m>", lambda _e: self.jarvis_listen())
+        self.bind("<Control-h>", lambda _e: self.set_mini(not self.mini))
         self.protocol("WM_DELETE_WINDOW", self._quit)
 
     # ================================================================ actions
@@ -243,6 +280,7 @@ class JarvisGUI(ctk.CTk):
 
     def _quit(self):
         get_camera().stop()
+        bridge.gui_attached = False
         self.destroy()
 
     def _on_ai_switch(self, label):
@@ -435,6 +473,12 @@ class JarvisGUI(ctk.CTk):
         win.lift()
 
     def append_log(self, text, who):
+        if who == "jarvis":
+            self._last_reply = text
+        elif who == "tool":
+            self._last_reply = "⚙ " + text
+        elif who == "you":
+            self._last_reply = "› " + text
         prefix = {"you": "YOU  › ", "jarvis": "JARVIS › ", "tool": "  ⚙ ", "system": "  ! "}.get(who, "")
         stamp = datetime.datetime.now().strftime("%H:%M ")
         self.log.configure(state="normal")
@@ -445,6 +489,168 @@ class JarvisGUI(ctk.CTk):
     def set_state(self, state):
         self.state_name = state
         self.status.configure(text=STATE_LABELS.get(state, state.upper()), text_color=STATE_COLORS.get(state, CYAN))
+
+    # ---------------------------------------------------------------- desktop control helpers
+    def _request_mini(self, on, done):
+        self.set_mini(on)
+        self.after(350 if on else 50, done.set)  # let the screen redraw before a screenshot
+
+    def set_mini(self, on):
+        """Mini mode: hide the full HUD and show a small always-on-top pill instead."""
+        if on == self.mini:
+            return
+        self.mini = on
+        if on:
+            self._was_fullscreen = bool(self.attributes("-fullscreen"))
+            self.attributes("-fullscreen", False)
+            self.withdraw()
+            self._show_pill()
+        else:
+            if self._pill is not None:
+                self._pill.withdraw()
+            self.deiconify()
+            if self._was_fullscreen:
+                self.attributes("-fullscreen", True)
+            self.lift()
+            self.focus_force()
+        self.update_idletasks()
+
+    def _show_pill(self):
+        if self._pill is None:
+            pill = tk.Toplevel(self, bg=BG, highlightbackground=CYAN, highlightthickness=1)
+            pill.overrideredirect(True)
+            pill.attributes("-topmost", True)
+            self._pill_canvas = tk.Canvas(pill, width=54, height=54, bg=BG, highlightthickness=0)
+            self._pill_canvas.pack(side="left", padx=6, pady=4)
+            box = tk.Frame(pill, bg=BG)
+            box.pack(side="left", fill="both", expand=True)
+            self._pill_status = tk.Label(box, text="", fg=CYAN, bg=BG, font=(FONT, 10, "bold"), anchor="w")
+            self._pill_status.pack(fill="x")
+            self._pill_text = tk.Label(box, text="", fg=TEXT, bg=BG, font=(FONT, 9), anchor="w",
+                                       justify="left", wraplength=250)
+            self._pill_text.pack(fill="x")
+            btns = tk.Frame(pill, bg=BG)
+            btns.pack(side="right", padx=6)
+            style = dict(bg="#0f3346", fg=TEXT, activebackground="#155a78", activeforeground=TEXT,
+                         relief="flat", font=(FONT, 10, "bold"), width=4, cursor="hand2")
+            tk.Button(btns, text="MIC", command=self.jarvis_listen, **style).pack(pady=2)
+            tk.Button(btns, text="HUD", command=lambda: self.set_mini(False), **style).pack(pady=2)
+            self._pill = pill
+            self.update_idletasks()
+            _no_activate(pill)  # clicking the pill must not steal focus from the app being controlled
+        w, h = 400, 66
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self._pill.geometry(f"{w}x{h}+{sw - w - 24}+{sh - h - 70}")
+        self._pill.deiconify()
+        self._pill.lift()
+
+    def _draw_pill(self):
+        c = self._pill_canvas
+        c.delete("all")
+        color = STATE_COLORS.get(self.state_name, CYAN)
+        t = self.tick
+        c.create_oval(4, 4, 50, 50, outline=DIM, width=1)
+        for i, (r, ext) in enumerate(((22, 80), (16, 120))):
+            start = (t * (4 if self.state_name == "thinking" else 1.5) * (1 if i == 0 else -1)) % 360
+            c.create_arc(27 - r, 27 - r, 27 + r, 27 + r, start=start, extent=ext, style="arc", outline=color, width=3)
+        pr = 7 + 2 * math.sin(t / 5)
+        c.create_oval(27 - pr, 27 - pr, 27 + pr, 27 + pr, fill=color, outline="")
+        self._pill_status.configure(text=f"J.A.R.V.I.S · {STATE_LABELS.get(self.state_name, '')}", fg=color)
+        reply = self._last_reply
+        self._pill_text.configure(text=reply if len(reply) < 90 else reply[:87] + "…")
+
+    def show_pointer(self, x, y, done):
+        """Animated targeting ring where Jarvis is about to click."""
+        size = 96
+        key = "#010203"
+        win = tk.Toplevel(self, bg=key)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        if config.OS_NAME == "Windows":
+            win.attributes("-transparentcolor", key)
+        else:
+            win.attributes("-alpha", 0.85)
+        win.geometry(f"{size}x{size}+{x - size // 2}+{y - size // 2}")
+        c = tk.Canvas(win, width=size, height=size, bg=key, highlightthickness=0)
+        c.pack()
+        self.update_idletasks()
+        _click_through(win)
+        m = size / 2
+
+        def frame(i=0):
+            if i > 7:
+                win.destroy()
+                done.set()
+                return
+            c.delete("all")
+            r = 44 - i * 4.5
+            c.create_oval(m - r, m - r, m + r, m + r, outline=CYAN, width=3)
+            c.create_oval(m - r / 2, m - r / 2, m + r / 2, m + r / 2, outline=AMBER, width=2)
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                c.create_line(m + dx * (r + 2), m + dy * (r + 2), m + dx * (r - 10), m + dy * (r - 10),
+                              fill=CYAN, width=2)
+            win.after(38, frame, i + 1)
+
+        frame()
+
+    def _track_foreground(self):
+        """Remember the last window that isn't Jarvis, to hand focus back before typing (Windows)."""
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if hwnd and pid.value != os.getpid():
+                self._last_foreign_hwnd = hwnd
+        except Exception:  # noqa: BLE001
+            return
+        self.after(300, self._track_foreground)
+
+    def _refocus(self, done):
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), ctypes.byref(pid))
+            if pid.value == os.getpid() and self._last_foreign_hwnd:
+                user32.SetForegroundWindow(self._last_foreign_hwnd)
+        except Exception:  # noqa: BLE001
+            pass
+        self.after(150, done.set)
+
+    def ask_confirm(self, message, done, result):
+        """Themed Yes/No dialog that doesn't freeze the HUD while it waits."""
+        win = ctk.CTkToplevel(self, fg_color=PANEL)
+        win.title("J.A.R.V.I.S. — confirm action")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        ctk.CTkLabel(win, text="⚠  CONFIRM ACTION", text_color=AMBER, font=(FONT, 15, "bold")).pack(
+            padx=20, pady=(16, 6), anchor="w")
+        ctk.CTkLabel(win, text=message[:1500], text_color=TEXT, font=(FONT, 12), justify="left",
+                     wraplength=560, anchor="w").pack(padx=20, pady=6, anchor="w")
+
+        def answer(ok):
+            result["ok"] = ok
+            done.set()
+            win.destroy()
+
+        row = ctk.CTkFrame(win, fg_color="transparent")
+        row.pack(pady=(8, 16))
+        ctk.CTkButton(row, text="YES, DO IT", width=140, fg_color="#155a78", hover_color="#1d7699",
+                      font=(FONT, 13, "bold"), command=lambda: answer(True)).pack(side="left", padx=8)
+        ctk.CTkButton(row, text="NO", width=140, fg_color="#3a1a1a", hover_color="#5a2424",
+                      font=(FONT, 13, "bold"), command=lambda: answer(False)).pack(side="left", padx=8)
+        win.protocol("WM_DELETE_WINDOW", lambda: answer(False))
+        win.bind("<Return>", lambda _e: answer(True))
+        win.bind("<Escape>", lambda _e: answer(False))
+        win.update_idletasks()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f"+{(sw - win.winfo_width()) // 2}+{(sh - win.winfo_height()) // 3}")
+        win.lift()
+        win.focus_force()
 
     # ================================================================ loops
     def _drain_bridge(self):
@@ -460,6 +666,9 @@ class JarvisGUI(ctk.CTk):
             "code": self.show_code,
             "camera": self._set_camera,
             "provider": lambda name: self.ai_switch.set(ai.LABELS[name]),
+            "mini": self._request_mini,
+            "pointer": self.show_pointer,
+            "refocus": self._refocus,
         }
         while not bridge.queue.empty():
             kind, args = bridge.queue.get_nowait()
@@ -470,9 +679,7 @@ class JarvisGUI(ctk.CTk):
                     self.update()
                     args[1].set()
                 elif kind == "confirm":
-                    message, done, result = args
-                    result["ok"] = messagebox.askyesno("J.A.R.V.I.S. — confirm action", message, parent=self)
-                    done.set()
+                    self.ask_confirm(*args)
                 elif kind in handlers:
                     handlers[kind](*args)
             except Exception as err:  # noqa: BLE001  (never let one bad message kill the HUD)
@@ -505,6 +712,8 @@ class JarvisGUI(ctk.CTk):
 
     def _animate(self):
         self.tick += 1
+        if self.mini and self._pill is not None:
+            self._draw_pill()
         if self.map and self.tick % 2 == 0:
             self._draw_map_overlay()
         if self.map_expanded:

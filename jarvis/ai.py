@@ -45,14 +45,15 @@ def _others():
     return [PROVIDERS[p] for p in configured() if p != provider()]
 
 
-def vision(prompt, image_bytes, mime_type="image/png", json_mode=False):
-    """Describe an image with the active provider, falling back to the other one."""
+def vision(prompt, image_bytes, mime_type="image/png", json_mode=False, fast=False):
+    """Describe an image with the active provider, falling back to the other one.
+    fast=True prefers quick, cheap models (used for finding things to click)."""
     try:
-        return module().vision(prompt, image_bytes, mime_type, json_mode)
+        return module().vision(prompt, image_bytes, mime_type, json_mode, fast)
     except Exception:
         for other in _others():
             try:
-                return other.vision(prompt, image_bytes, mime_type, json_mode)
+                return other.vision(prompt, image_bytes, mime_type, json_mode, fast)
             except Exception:  # noqa: BLE001
                 continue
         raise

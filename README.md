@@ -16,7 +16,7 @@ it answers in a **free Microsoft neural voice** (British "Ryan" by default), and
 | Code | "write a snake game in Python and run it", "make a script that renames my photos", "open it in VS Code". Jarvis writes the file, runs it, reads the errors and fixes them |
 | Camera sensors | "what do your sensors see?", "how far away am I?", "what am I holding?". Face tracking with target brackets, distance estimate, motion and light meters, and "welcome back" when you return |
 | AI switch | "switch to ChatGPT" / "switch to Gemini", or the AI CORE switch at the top |
-| Mouse & keyboard | "move the mouse to the top-left", "click the Send button", "type hello world", "press ctrl+t" |
+| Desktop control | "click the Send button", "type hello into the search box and press enter", "tick Urgent", "drag report.pdf to the Recycle Bin", "close Notepad", "switch to Chrome", "copy that to the clipboard". Multi-step tasks run to the end, with Jarvis checking a screenshot after every action |
 | Screen vision | "what's on my screen?", "read me that error message" |
 | Camera | "turn on the camera", "what am I holding?", "take a photo" |
 | Apps & system | "open Spotify", "open youtube.com", "play lo-fi on YouTube", "volume 40", "next track", "system status" |
@@ -78,11 +78,31 @@ https://platform.openai.com/api-keys.
 |---|---|
 | Type + Enter | Send a text command |
 | 🎤 MIC / Ctrl+M | Speak one command |
+| Ctrl+H | Switch between the full HUD and the mini pill |
 | Wake word switch | Hands-free: say "Jarvis, …" anytime |
 | ■ STOP | Stop talking |
 | F11 / Esc | Toggle / leave fullscreen |
 | Ctrl+Q | Quit |
 | Mouse to a screen corner | Emergency stop for mouse/keyboard automation (PyAutoGUI failsafe) |
+
+## How desktop control works
+
+- **Precise targeting.** On Windows, Jarvis reads the real buttons, links and fields of the
+  active window from Windows UI Automation and clicks their exact centre. Everywhere else, and
+  for things UI Automation can't see, it finds the element on a screenshot, then zooms in on
+  that area and finds it again, to within a few pixels.
+- **It checks its work.** After every click, keystroke or app launch, the AI gets a fresh
+  screenshot. It confirms the action worked, handles pop-ups and loading pages, and never
+  repeats an action by accident. Only the newest screenshot is kept, to save quota. Set
+  `AUTO_SCREENSHOTS=false` to turn this off.
+- **Mini mode.** While Jarvis works on the desktop, the fullscreen HUD shrinks to a small
+  always-on-top pill in the corner. The pill shows what Jarvis is doing and has MIC and HUD
+  buttons. Ctrl+H toggles it, or say "show the HUD".
+- **Visible and interruptible.** A cyan targeting ring flashes where Jarvis is about to
+  click, and the cursor glides there. Slam the mouse into any screen corner to stop
+  automation instantly.
+- **Separate quota for clicking.** Finding things to click uses Gemini's "lite" models first.
+  They have their own free-tier quota, so clicking doesn't use up the main model's requests.
 
 ## Email
 
@@ -137,7 +157,8 @@ jarvis/model_pool.py   automatic model switching (fallback + backup requests)
 jarvis/voice.py        edge-tts voice output, SpeechRecognition mic input
 jarvis/camera.py       webcam + sensors (face tracking, distance, motion, light) and HUD overlay
 jarvis/bridge.py       thread-safe worker → GUI messages (logs, map, confirmations)
-jarvis/tools/          everything Jarvis can do: system, code, web/map, vision, email, instagram, memory
+jarvis/tools/          everything Jarvis can do: screen (mouse, keyboard, windows), system, code,
+                       web/map, vision, email, instagram, memory
 ```
 
 To add a skill, write a function with type hints and a docstring in `jarvis/tools/`,

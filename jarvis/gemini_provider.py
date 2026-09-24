@@ -1,4 +1,5 @@
 """Google Gemini (free tier)."""
+import functools
 import re
 
 from google import genai
@@ -41,6 +42,7 @@ def client():
     return _client
 
 
+@functools.lru_cache(maxsize=1)
 def _fetch_models():
     return [
         m.name.split("/")[-1]
@@ -80,10 +82,26 @@ pool = ModelPool(
 )
 
 
-def vision(prompt, image_bytes, mime_type="image/png", json_mode=False):
+# Locating things on screen uses the "lite" models first: they're fast, good at pointing and
+# have their own free-tier quota, so clicking doesn't use up the main model's requests.
+vision_pool = ModelPool(
+    LABEL + " vision",
+    _fetch_models,
+    ["gemini-3.1-flash-lite", "gemini-flash-lite-latest", "gemini-3.5-flash-lite",
+     "gemini-3.1-flash-lite-preview"] + PREFERRED,
+    wanted=lambda: "",
+    keep=lambda n: "flash" in n and not _SKIP.search(n),
+    error_code=error_code,
+    is_fatal=is_fatal,
+)
+
+
+def vision(prompt, image_bytes, mime_type="image/png", json_mode=False, fast=False):
     cfg = types.GenerateContentConfig(response_mime_type="application/json") if json_mode else None
     contents = [types.Part.from_bytes(data=image_bytes, mime_type=mime_type), prompt]
-    resp = pool.run(lambda m: client().models.generate_content(model=m, contents=contents, config=cfg))
+    resp = (vision_pool if fast else pool).run(
+        lambda m: client().models.generate_content(model=m, contents=contents, config=cfg)
+    )
     return resp.text or ""
 
 
@@ -106,7 +124,7 @@ def _strip_signatures(contents):
         parts = [
             types.Part(text=p.text, function_call=p.function_call, function_response=p.function_response)
             for p in c.parts or []
-            if not p.thought
+            if not p.thought and not p.inline_data
         ]
         if parts:
             clean.append(types.Content(role=c.role, parts=parts))
@@ -145,7 +163,13 @@ class Session:
                 self.history = self.history[i:]
                 return
 
-    def ask(self, text, max_steps=25):
+    def _drop_old_images(self):
+        """Keep only the newest screenshot in the conversation (saves tokens and quota)."""
+        for c in self.history:
+            if any(p.inline_data for p in c.parts or []):
+                c.parts = [types.Part(text="[earlier screenshot removed]") if p.inline_data else p for p in c.parts]
+
+    def ask(self, text, max_steps=30, observe=None):
         self._trim()
         start = len(self.history)
         self.history.append(types.Content(role="user", parts=[types.Part(text=text)]))
@@ -166,6 +190,13 @@ class Session:
                     )
                     for c in calls
                 ]
+                image = observe([c.name for c in calls]) if observe else None
+                if image:
+                    self._drop_old_images()
+                    results += [
+                        types.Part(text="Screenshot of the screen after these actions:"),
+                        types.Part.from_bytes(data=image, mime_type="image/jpeg"),
+                    ]
                 self.history.append(types.Content(role="user", parts=results))
             return f"That took more steps than I'm allowed, {config.USER_TITLE}. I've stopped here."
         except Exception:

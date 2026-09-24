@@ -1,7 +1,8 @@
-from . import code_tools, email_tools, instagram, memory, system, vision_tools, web
+from . import code_tools, email_tools, instagram, memory, screen, system, vision_tools, web
 
 ALL_TOOLS = (
-    system.TOOLS
+    screen.TOOLS
+    + system.TOOLS
     + code_tools.TOOLS
     + web.TOOLS
     + vision_tools.TOOLS

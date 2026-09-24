@@ -12,6 +12,15 @@ from . import config
 class UIBridge:
     def __init__(self):
         self.queue = queue.Queue()
+        self.gui_attached = False  # set by the GUI; without it, display requests return at once
+
+    def request(self, kind, *args, timeout=3):
+        """Ask the GUI to do something and wait until it has (e.g. hide the HUD before a screenshot)."""
+        if not self.gui_attached:
+            return
+        done = threading.Event()
+        self.post(kind, *args, done)
+        done.wait(timeout)
 
     def post(self, kind, *args):
         self.queue.put((kind, args))

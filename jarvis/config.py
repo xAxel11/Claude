@@ -49,6 +49,8 @@ MIC_INDEX = _int_or_none("MIC_INDEX")
 CAMERA_INDEX = _int_or_none("CAMERA_INDEX") or 0
 
 CONFIRM_ACTIONS = _bool("CONFIRM_ACTIONS", True)
+# Show the AI a screenshot after each desktop action so it can check its work
+AUTO_SCREENSHOTS = _bool("AUTO_SCREENSHOTS", True)
 START_FULLSCREEN = _bool("START_FULLSCREEN", True)
 
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "")
