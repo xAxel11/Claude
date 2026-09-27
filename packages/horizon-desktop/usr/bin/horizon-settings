@@ -223,11 +223,12 @@ def first_installed(kind, candidates):
         "colorscheme": ["/usr/share/color-schemes/{}.colors", "~/.local/share/color-schemes/{}.colors"],
         "desktoptheme": ["/usr/share/plasma/desktoptheme/{}", "~/.local/share/plasma/desktoptheme/{}"],
         "decoration": ["/usr/share/aurorae/themes/{}", "~/.local/share/aurorae/themes/{}"],
-        "kvantum": ["/usr/share/Kvantum/{}", "~/.config/Kvantum/{}"],
+        # Kvantum keeps variants (e.g. WhiteSurDark) inside the base theme's folder.
+        "kvantum": ["/usr/share/Kvantum/{}", "/usr/share/Kvantum/*/{}.kvconfig", "~/.config/Kvantum/{}"],
         "icons": ["/usr/share/icons/{}/index.theme", "~/.local/share/icons/{}/index.theme"],
     }[kind]
     for name in candidates:
-        if any(Path(os.path.expanduser(r.format(name))).exists() for r in roots):
+        if any(glob.glob(os.path.expanduser(r.format(name))) for r in roots):
             return name
     return None
 
