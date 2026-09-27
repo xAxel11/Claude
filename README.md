@@ -2,6 +2,8 @@
 
 A macOS-style Linux distribution based on **Ubuntu 26.04 LTS** and **KDE Plasma 6**.
 
+![Horizon OS live desktop](documents/live-desktop-screenshot.png)
+
 - **Menu bar on top.** Logo menu, a global application menu, system tray and clock.
 - **Floating dock at the bottom.** Centered, with Launchpad (fullscreen app grid), pinned apps, running-app indicators and a Trash. It hides when a window touches it.
 - **Spotlight-style search.** KRunner opens centered with `Alt+Space`.
