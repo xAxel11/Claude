@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Pip - a little desktop pet for Pop!_OS (and other Linux desktops).
 
-Pip walks along the bottom of your screen and reacts to your system:
-CPU load, memory, battery, network and plugged-in USB devices.
+Pip walks along the bottom of your screen, plays with your mouse cursor and
+reacts to your system: CPU load, memory, battery, network and USB devices.
 
-Right-click Pip for the menu (including "Remove pet").
+Drag Pip around and throw it, rub it with the cursor, or right-click it for
+the menu (including "Remove pet").
 """
 
 import fcntl
@@ -16,9 +17,10 @@ import signal
 import sys
 import time
 
-# Wayland does not let apps position their own windows, so run through
-# XWayland (available on Pop!_OS COSMIC and GNOME) to be able to walk around.
-os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+# Wayland does not let apps position their own windows, so always run through
+# XWayland (built into Pop!_OS COSMIC and GNOME). Without this, dragging and
+# walking can't move the window. Set PET_QT_PLATFORM to override.
+os.environ["QT_QPA_PLATFORM"] = os.environ.get("PET_QT_PLATFORM", "xcb")
 
 try:
     from PyQt5.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer
@@ -39,11 +41,14 @@ LOCK_FILE = os.path.expanduser("~/.cache/desktop-pet.lock")
 
 WIN_W, WIN_H = 240, 190   # window size; pet sits at the bottom centre
 GROUND = WIN_H - 6        # y of the pet's feet inside the window
+PIVOT = GROUND - 40       # body centre, used for tilting and cursor maths
 FPS = 30
+GRAVITY = 1.1
 
 BODY = QColor("#48b9c7")      # Pop!_OS teal
 BODY_HOT = QColor("#f07b5b")
 BODY_TIRED = QColor("#8fa9ad")
+BODY_ANGRY = QColor("#e0524a")
 CHEEK = QColor(250, 164, 26, 150)  # Pop!_OS orange
 INK = QColor("#2b3a3d")
 
@@ -53,6 +58,10 @@ def blend(a, b, t):
     return QColor(int(a.red() + (b.red() - a.red()) * t),
                   int(a.green() + (b.green() - a.green()) * t),
                   int(a.blue() + (b.blue() - a.blue()) * t))
+
+
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
 
 
 def read(path):
@@ -134,6 +143,7 @@ class Pet(QWidget):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setMouseTracking(True)   # hover and rubbing without clicking
         self.setWindowTitle("Desktop Pet")
         self.resize(WIN_W, WIN_H)
 
@@ -144,26 +154,46 @@ class Pet(QWidget):
         area = self.area()
         self.px = float(random.randint(area.left(), max(area.left(), area.right() - WIN_W)))
         self.py = float(self.ground_y())
-        self.vy = 0.0
+        self.vx = self.vy = 0.0
+        self.air_max_speed = 0.0
         self.dir = random.choice((-1, 1))
         self.state = "walk"
         self.state_frames = FPS * 4
+        self.moving = False
         self.phase = 0.0
+        self.tilt = 0.0
+        self.squash_frames = 0
         self.blink = 0
         self.blink_wait = FPS * 3
-        self.drag_offset = None
-        self.press_pos = None
         self.stay_still = False
+        self.follow = False
         self.forced_sleep = False
         self.quiet = False
 
-        # Moods driven by the system
+        # Mouse
+        self.drag_offset = None
+        self.press_pos = None
+        self.drag_samples = []  # recent (time, QPoint) for throwing
+        self.drag_vx = 0.0
+        self.clicks = []
+        self.cursor = QCursor.pos()
+        self.cursor_speed = 0.0
+        self.cursor_still = 0   # frames since the cursor last moved
+        self.hovering = False
+        self.hover_frames = 0
+        self.rub = 0.0
+        self.last_hover_pos = None
+
+        # Moods
         self.hot = 0.0          # 0..1, CPU heat
         self.tired = False      # low battery
         self.happy_frames = 0
         self.eating_frames = 0
         self.sad_frames = 0
         self.surprised_frames = 0
+        self.angry_frames = 0
+        self.dizzy_frames = 0
+        self.dance_frames = 0
         self.cpu_high_count = 0
 
         # Speech bubble and particles
@@ -191,7 +221,7 @@ class Pet(QWidget):
 
         QTimer.singleShot(800, lambda: self.say(random.choice(
             ["Hi! I'm Pip.", "Hello there!", "Pip reporting for duty!"]), 4))
-        QTimer.singleShot(5500, lambda: self.say("Right-click me for options.", 4))
+        QTimer.singleShot(5500, lambda: self.say("Drag me, throw me, or right-click me!", 4))
 
     # ---------- geometry ----------
 
@@ -207,6 +237,13 @@ class Pet(QWidget):
     def x_limits(self):
         a = self.area()
         return a.left() - (WIN_W // 2 - 42), a.right() - WIN_W // 2 - 42
+
+    def centre(self):
+        """Pet's body centre in screen coordinates."""
+        return QPointF(self.px + WIN_W / 2, self.py + PIVOT)
+
+    def on_ground(self):
+        return self.state not in ("drag", "air")
 
     # ---------- talking and moods ----------
 
@@ -226,6 +263,7 @@ class Pet(QWidget):
 
     def make_happy(self, text=None):
         self.happy_frames = FPS * 3
+        self.angry_frames = 0
         for _ in range(5):
             self.particles.append(["heart", WIN_W / 2 + random.uniform(-25, 25),
                                    GROUND - 85, random.uniform(-0.6, 0.6),
@@ -233,24 +271,42 @@ class Pet(QWidget):
         if text:
             self.say(text, 3)
 
+    def resting_state(self):
+        return "chase" if self.follow else "idle"
+
     def wake(self):
         if self.state == "sleep":
             self.forced_sleep = False
-            self.set_state("idle", FPS * 2)
+            self.set_state(self.resting_state(), FPS * 2)
             self.surprised_frames = FPS // 2
 
-    def set_state(self, state, frames):
+    def set_state(self, state, frames=0):
         self.state = state
         self.state_frames = frames
+
+    def launch(self, vx, vy):
+        """Send Pip flying (jumps, throws, startles)."""
+        self.vx, self.vy = vx, vy
+        self.air_max_speed = 0.0
+        self.set_state("air")
 
     def choose_next_state(self):
         hour = time.localtime().tm_hour
         sleepy = self.tired or hour >= 23 or hour < 5
         r = random.random()
-        if self.stay_still:
+        if self.follow:
+            self.set_state("chase")
+        elif self.stay_still:
             self.set_state("idle", FPS * random.randint(3, 8))
-        elif r < (0.25 if sleepy else 0.06):
+        elif self.cursor_nearby() and r < 0.4:
+            self.set_state("approach", FPS * 6)
+            if self.ready("curious", 60):
+                self.say(random.choice(["Whatcha doing?", "Ooh, the cursor!",
+                                        "Can I help?"]), 3)
+        elif r < (0.25 if sleepy else 0.05):
             self.set_state("sleep", FPS * random.randint(8, 20))
+        elif r < 0.12 and self.ready("dance", 120):
+            self.start_dance()
         elif r < 0.62:
             if random.random() < 0.35:
                 self.dir *= -1
@@ -263,13 +319,19 @@ class Pet(QWidget):
     def chatter(self):
         lines = ["La la la...", "Nice desktop!", "What are we building today?",
                  "Remember to drink some water.", "*looks around*",
-                 "Pop!_OS is my favourite home."]
+                 "Pop!_OS is my favourite home.", "Try throwing me!"]
         hours = self.sys.uptime_hours()
         if hours > 4:
             lines.append(f"Computer's been on {int(hours)} hours. Stretch break?")
         if time.time() - self.start_time > 3600:
             lines.append("We've been hanging out for a while :)")
         return lines
+
+    def start_dance(self):
+        self.wake()
+        self.dance_frames = FPS * 5
+        self.set_state("dance", FPS * 5)
+        self.say(random.choice(["Dance party!", "*wiggle wiggle*", "Music time!"]), 3)
 
     # ---------- system reactions ----------
 
@@ -330,44 +392,65 @@ class Pet(QWidget):
         if (hour >= 23 or hour < 5) and self.state != "sleep" and self.ready("late", 1800):
             self.say("It's late... you should sleep too.", 4)
 
+    # ---------- cursor ----------
+
+    def update_cursor(self):
+        pos = QCursor.pos()
+        moved = (pos - self.cursor).manhattanLength()
+        self.cursor_speed = self.cursor_speed * 0.5 + moved * 0.5
+        self.cursor_still = 0 if moved else self.cursor_still + 1
+        self.cursor = pos
+
+        self.rub *= 0.93
+        if self.hovering:
+            self.hover_frames += 1
+            if self.hover_frames == FPS * 2 and self.state != "sleep" and self.ready("hover", 20):
+                self.say(random.choice(["Hehe, hi there!", "*sniff sniff*", "Is that for me?"]), 2)
+
+        if self.state in ("drag", "air", "sleep") or self.dizzy_frames:
+            return
+        c = self.centre()
+        dist = math.hypot(pos.x() - c.x(), pos.y() - c.y())
+        # Cursor zoomed past right next to Pip: jump in fright
+        if dist < 100 and self.cursor_speed > 45 and self.hover_frames < FPS // 2 \
+                and self.ready("startle", 6):
+            self.surprised_frames = FPS
+            self.launch(-math.copysign(3, pos.x() - c.x()), -10)
+            self.say(random.choice(["Eek!", "Whoa!", "Careful!"]), 2)
+
+    def cursor_nearby(self):
+        """Cursor recently moved and is close to Pip's patch of floor."""
+        c = self.centre()
+        return (self.cursor_still < FPS * 3
+                and abs(self.cursor.x() - c.x()) < 600
+                and self.area().bottom() - self.cursor.y() < 320)
+
+    def walk_toward_cursor(self, stop, max_speed):
+        target = self.cursor.x() - WIN_W / 2
+        dx = target - self.px
+        self.moving = abs(dx) > stop
+        if self.moving:
+            self.dir = 1 if dx > 0 else -1
+            speed = min(max_speed, abs(dx) - stop)
+            self.px += self.dir * speed
+            self.phase += 0.16 * speed
+        return dx
+
     # ---------- animation loop ----------
 
     def tick(self):
-        if self.drag_offset is None:
-            ground = self.ground_y()
-            lo, hi = self.x_limits()
-            if self.state == "fall":
-                self.vy += 1.3
-                self.py += self.vy
-                if self.py >= ground:
-                    self.py = ground
-                    if self.vy > 14:
-                        self.surprised_frames = FPS // 2
-                        self.say(random.choice(["Oof!", "Wheee... ouch.", "Safe landing!"]), 2)
-                    self.vy = 0
-                    self.set_state("idle", FPS * 2)
-            else:
-                self.py = ground
-                if self.state == "walk":
-                    speed = 1.6 + 2.2 * self.hot - (0.8 if self.tired else 0)
-                    self.px += self.dir * speed
-                    self.phase += 0.16 * speed
-                    if self.px <= lo:
-                        self.px, self.dir = lo, 1
-                    elif self.px >= hi:
-                        self.px, self.dir = hi, -1
-                elif self.state == "sleep" and random.random() < 1 / 40:
-                    self.particles.append(["z", WIN_W / 2 + 20, GROUND - 70, 0.4, -0.7, FPS * 2])
-                if self.state != "sleep" or not self.forced_sleep:
-                    self.state_frames -= 1
-                    if self.state_frames <= 0:
-                        self.choose_next_state()
-            self.px = max(lo, min(hi, self.px))
+        self.update_cursor()
+        if self.state == "drag":
+            self.drag_vx *= 0.8
+        elif self.state == "air":
+            self.step_air()
+        else:
+            self.step_ground()
+        if self.state != "drag":
             self.move(int(self.px), int(self.py))
 
-        if self.hot > 0.5 and random.random() < 1 / 25:
-            self.particles.append(["drop", WIN_W / 2 + random.choice((-30, 30)),
-                                   GROUND - 60, 0, 0.8, FPS])
+        self.update_tilt()
+        self.spawn_ambient_particles()
 
         # Blinking
         if self.blink > 0:
@@ -378,9 +461,13 @@ class Pet(QWidget):
                 self.blink = 5
                 self.blink_wait = random.randint(FPS * 2, FPS * 6)
 
-        for name in ("happy_frames", "eating_frames", "sad_frames",
-                     "surprised_frames", "bubble_frames"):
+        for name in ("happy_frames", "eating_frames", "sad_frames", "surprised_frames",
+                     "bubble_frames", "angry_frames", "squash_frames", "dance_frames"):
             setattr(self, name, max(0, getattr(self, name) - 1))
+        if self.dizzy_frames:
+            self.dizzy_frames -= 1
+            if self.dizzy_frames == 0 and random.random() < 0.5:
+                self.say(random.choice(["Again! Again!", "That was fun!", "*shakes head*"]), 3)
 
         for p in self.particles:
             p[1] += p[3]
@@ -391,35 +478,222 @@ class Pet(QWidget):
         self.update_mask()
         self.update()
 
+    def step_ground(self):
+        self.py = self.ground_y()
+        lo, hi = self.x_limits()
+        self.moving = False
+
+        if self.dizzy_frames:
+            pass  # too dizzy to go anywhere
+        elif self.state == "walk":
+            speed = 1.6 + 2.2 * self.hot - (0.8 if self.tired else 0)
+            self.moving = True
+            self.px += self.dir * speed
+            self.phase += 0.16 * speed
+            if self.px <= lo:
+                self.px, self.dir = lo, 1
+            elif self.px >= hi:
+                self.px, self.dir = hi, -1
+        elif self.state == "approach":
+            self.walk_toward_cursor(stop=70, max_speed=2.4)
+        elif self.state == "chase":
+            dx = self.walk_toward_cursor(stop=6, max_speed=4.0)
+            head_y = self.py + GROUND - 85
+            height = head_y - self.cursor.y()
+            if abs(dx) < 60 and 30 < height < 420 and self.ready("jump", 1.2):
+                self.launch(clamp(dx / 12, -4, 4), -min(24, math.sqrt(2 * GRAVITY * height) + 2))
+                if random.random() < 0.3:
+                    self.say(random.choice(["Hup!", "Almost!", "Gonna get it!"]), 1.5)
+
+        if self.state in ("walk", "idle", "approach", "dance", "sleep") \
+                and not (self.state == "sleep" and self.forced_sleep):
+            self.state_frames -= 1
+            if self.state_frames <= 0:
+                self.choose_next_state()
+        self.px = clamp(self.px, lo, hi)
+
+    def step_air(self):
+        lo, hi = self.x_limits()
+        ground = self.ground_y()
+        top = self.area().top() - (GROUND - 110)
+        self.vy += GRAVITY
+        self.vx *= 0.995
+        self.px += self.vx
+        self.py += self.vy
+        self.air_max_speed = max(self.air_max_speed, math.hypot(self.vx, self.vy))
+
+        if self.px < lo or self.px > hi:
+            self.px = clamp(self.px, lo, hi)
+            self.vx = -self.vx * 0.6
+            self.squash_frames = 5
+            if abs(self.vx) > 6 and self.ready("wall", 2):
+                self.say(random.choice(["Boing!", "Ouch, a wall!", "Bonk!"]), 1.5)
+        if self.py < top:
+            self.py, self.vy = top, abs(self.vy) * 0.5
+
+        if self.follow and self.ready("catch", 5):
+            c = self.centre()
+            if math.hypot(self.cursor.x() - c.x(), self.cursor.y() - (c.y() - 45)) < 35:
+                self.make_happy("Got it!")
+            else:
+                self.cooldowns["catch"] = 0
+
+        if self.py >= ground:
+            self.py = ground
+            impact = self.vy
+            self.squash_frames = 6
+            self.dust()
+            if impact > 12:
+                self.vy = -impact * 0.4
+                self.vx *= 0.7
+            else:
+                self.land()
+
+    def land(self):
+        self.vx = self.vy = 0.0
+        speed = self.air_max_speed
+        if speed > 30:
+            self.dizzy_frames = FPS * 3
+            self.say(random.choice(["Whoa... the room is spinning...", "@_@", "Wheee... ugh."]), 3)
+        elif speed > 15 and random.random() < 0.6:
+            self.say(random.choice(["Wheee!", "Safe landing!", "Ta-da!"]), 2)
+        self.set_state(self.resting_state(), int(FPS * 1.5))
+
+    def update_tilt(self):
+        target = 0.0
+        if self.state == "drag":
+            target = clamp(-self.drag_vx * 2.5, -45, 45) + math.sin(time.time() * 6) * 4
+        elif self.state == "air":
+            if self.air_max_speed > 30:
+                self.tilt += self.vx * 2.5   # spinning through the air
+                return
+            target = clamp(self.vx * 2, -25, 25)
+        elif self.state == "dance":
+            target = math.sin(self.dance_frames * 0.35) * 16
+        elif self.dizzy_frames:
+            target = math.sin(self.dizzy_frames * 0.3) * 10
+        elif self.state not in ("sleep",):
+            # Lean a little towards a nearby cursor
+            c = self.centre()
+            dx = self.cursor.x() - c.x()
+            if abs(dx) < 250 and abs(self.cursor.y() - c.y()) < 250:
+                target = clamp(dx / 30, -7, 7)
+        # Unwind any spin the short way round, then ease towards the target
+        self.tilt = (self.tilt + 180) % 360 - 180
+        self.tilt += (target - self.tilt) * 0.25
+
+    def spawn_ambient_particles(self):
+        if self.state == "sleep" and random.random() < 1 / 40:
+            self.particles.append(["z", WIN_W / 2 + 20, GROUND - 70, 0.4, -0.7, FPS * 2])
+        if self.hot > 0.5 and random.random() < 1 / 25:
+            self.particles.append(["drop", WIN_W / 2 + random.choice((-30, 30)),
+                                   GROUND - 60, 0, 0.8, FPS])
+        if self.angry_frames and random.random() < 1 / 6:
+            self.particles.append(["puff", WIN_W / 2 + random.choice((-22, 22)),
+                                   GROUND - 95, random.uniform(-0.3, 0.3), -1.2, FPS])
+        if self.state == "dance" and random.random() < 1 / 10:
+            self.particles.append(["note", WIN_W / 2 + random.uniform(-45, 45),
+                                   GROUND - 80, random.uniform(-0.5, 0.5), -1.3, FPS * 2])
+
+    def dust(self):
+        for side in (-1, 1):
+            for _ in range(3):
+                self.particles.append(["dust", WIN_W / 2 + side * 25, GROUND - 4,
+                                       side * random.uniform(0.8, 2.2),
+                                       random.uniform(-0.8, -0.2), FPS // 2])
+
     # ---------- input ----------
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
             self.drag_offset = e.globalPos() - QPoint(int(self.px), int(self.py))
             self.press_pos = e.globalPos()
-            self.wake()
+            self.drag_samples = [(time.time(), e.globalPos())]
+            self.drag_vx = 0.0
+        elif e.button() == Qt.MiddleButton:
+            self.start_dance()
 
     def mouseMoveEvent(self, e):
-        if self.drag_offset is not None:
-            pos = e.globalPos() - self.drag_offset
-            if (e.globalPos() - self.press_pos).manhattanLength() > 4:
-                self.state = "drag"
-            self.px, self.py = float(pos.x()), float(pos.y())
-            self.move(pos)
+        if self.drag_offset is None:
+            # Hovering: moving the cursor back and forth over Pip is a rub
+            if self.last_hover_pos is not None:
+                self.rub += (e.globalPos() - self.last_hover_pos).manhattanLength()
+            self.last_hover_pos = e.globalPos()
+            if self.rub > 500 and self.ready("rub", 3):
+                self.rub = 0
+                if self.state == "sleep":
+                    self.make_happy()
+                    self.say("*purrs in sleep*", 2)
+                else:
+                    self.make_happy(random.choice(["Purrr...", "Ooh, that's the spot!",
+                                                   "More scratches!", "Hehe, that tickles!"]))
+            return
+
+        pos = e.globalPos()
+        if self.state != "drag" and (pos - self.press_pos).manhattanLength() > 4:
+            was_sleeping = self.state == "sleep"
+            self.forced_sleep = False
+            self.set_state("drag")
+            self.surprised_frames = FPS // 2
+            if was_sleeping:
+                self.say("Huh?! Where are we going?", 2)
+            elif self.ready("pickup", 8):
+                self.say(random.choice(["Wheee!", "Up we go!", "Put me down!", "I can fly!"]), 2)
+        if self.state == "drag":
+            now = time.time()
+            self.drag_samples = [(t, p) for t, p in self.drag_samples if now - t < 0.12]
+            self.drag_samples.append((now, pos))
+            prev = self.drag_samples[0][1]
+            self.drag_vx = self.drag_vx * 0.5 + (pos.x() - prev.x()) / max(1, len(self.drag_samples)) * 0.5
+            top_left = pos - self.drag_offset
+            self.px, self.py = float(top_left.x()), float(top_left.y())
+            self.move(top_left)
 
     def mouseReleaseEvent(self, e):
-        if e.button() == Qt.LeftButton and self.drag_offset is not None:
-            self.drag_offset = None
-            if self.state == "drag":
-                self.vy = 0
-                self.set_state("fall", 0)
-                self.px = max(self.x_limits()[0], min(self.x_limits()[1], self.px))
-            else:
-                self.make_happy(random.choice(["Hehe!", "That tickles!", "Hi!"]))
+        if e.button() != Qt.LeftButton or self.drag_offset is None:
+            return
+        self.drag_offset = None
+        if self.state == "drag":
+            # Throw with the speed the mouse was moving at
+            (t0, p0), (t1, p1) = self.drag_samples[0], self.drag_samples[-1]
+            dt = max(t1 - t0, 1 / FPS)
+            vx = (p1.x() - p0.x()) / dt / FPS
+            vy = (p1.y() - p0.y()) / dt / FPS
+            if time.time() - t1 > 0.08:   # mouse had stopped before letting go
+                vx = vy = 0.0
+            self.launch(clamp(vx, -45, 45), clamp(vy, -45, 45))
+        else:
+            self.poke()
+
+    def poke(self):
+        now = time.time()
+        self.clicks = [t for t in self.clicks if now - t < 3] + [now]
+        self.wake()
+        if len(self.clicks) >= 5:
+            self.clicks = []
+            self.angry_frames = FPS * 4
+            self.happy_frames = 0
+            self.say(random.choice(["Hey! Stop poking me!", "Grrr!", "That's enough!"]), 3)
+        elif self.angry_frames:
+            self.say("Hmph!", 1.5)
+        else:
+            if self.on_ground():
+                self.launch(0, -7)   # little hop
+            self.make_happy(random.choice(["Hehe!", "That tickles!", "Hi!", "Boop!"]))
 
     def mouseDoubleClickEvent(self, e):
         if e.button() == Qt.LeftButton:
             self.make_happy("I love you too!")
+
+    def enterEvent(self, _):
+        self.hovering = True
+        self.hover_frames = 0
+        self.last_hover_pos = None
+
+    def leaveEvent(self, _):
+        self.hovering = False
+        self.hover_frames = 0
+        self.last_hover_pos = None
 
     def contextMenuEvent(self, e):
         menu = QMenu(self)
@@ -428,9 +702,16 @@ class Pet(QWidget):
         pet.triggered.connect(lambda: self.make_happy("Purrr..."))
         feed = menu.addAction("Give a snack")
         feed.triggered.connect(self.feed)
+        dance = menu.addAction("Dance!")
+        dance.triggered.connect(self.start_dance)
 
         sleep = menu.addAction("Wake up" if self.state == "sleep" else "Go to sleep")
         sleep.triggered.connect(self.toggle_sleep)
+
+        follow = menu.addAction("Follow my cursor")
+        follow.setCheckable(True)
+        follow.setChecked(self.follow)
+        follow.toggled.connect(self.set_follow)
 
         still = menu.addAction("Stay still")
         still.setCheckable(True)
@@ -470,14 +751,28 @@ class Pet(QWidget):
             self.wake()
             self.say("I'm up, I'm up!", 2)
         else:
+            self.follow = False
             self.forced_sleep = True
             self.set_state("sleep", FPS * 60)
             self.say("Good night...", 2)
 
+    def set_follow(self, on):
+        self.follow = on
+        if on:
+            self.stay_still = False
+            self.wake()
+            if self.on_ground():
+                self.set_state("chase")
+            self.say("Wait for me!", 2)
+        elif self.state == "chase":
+            self.set_state("idle", FPS * 2)
+
     def set_stay_still(self, on):
         self.stay_still = on
-        if on and self.state == "walk":
-            self.set_state("idle", FPS * 5)
+        if on:
+            self.follow = False
+            if self.state in ("walk", "chase", "approach"):
+                self.set_state("idle", FPS * 5)
 
     def set_quiet(self, on):
         self.quiet = on
@@ -528,7 +823,7 @@ class Pet(QWidget):
         text_rect = fm.boundingRect(QRect(0, 0, WIN_W - 30, 200),
                                     Qt.TextWordWrap | Qt.AlignCenter, self.bubble_text)
         w, h = text_rect.width() + 20, text_rect.height() + 12
-        top = GROUND - 100 - h
+        top = GROUND - 112 - h
         return QRect((WIN_W - w) // 2, max(0, top), w, h)
 
     def bubble_font(self):
@@ -542,11 +837,15 @@ class Pet(QWidget):
         bubble = None
         if self.bubble_frames > 0:
             bubble = self.bubble_rect(QFontMetrics(self.bubble_font()))
-        key = (bubble.getRect() if bubble else None)
+        wide = self.state in ("drag", "air", "dance") or abs(self.tilt) > 4 or bool(self.dizzy_frames)
+        key = (bubble.getRect() if bubble else None, wide)
         if key == self._mask_key:
             return
         self._mask_key = key
-        region = QRegion(QRect(WIN_W // 2 - 62, GROUND - 105, 124, 111))
+        if wide:
+            region = QRegion(QRect(WIN_W // 2 - 85, GROUND - 125, 170, 131))
+        else:
+            region = QRegion(QRect(WIN_W // 2 - 62, GROUND - 108, 124, 114))
         if bubble:
             region = region.united(QRegion(bubble.adjusted(-2, -2, 2, 12)))
         self.setMask(region)
@@ -564,54 +863,69 @@ class Pet(QWidget):
         cx = WIN_W / 2
         sleeping = self.state == "sleep"
         dragged = self.state == "drag"
-        walking = self.state == "walk"
-        step = math.sin(self.phase) if walking else 0.0
-        bob = abs(step) * 3 if walking else (math.sin(time.time() * 2) * 1.2 if sleeping else 0)
-        if self.state == "idle" and self.happy_frames:
+        airborne = self.state == "air"
+        step = math.sin(self.phase) if self.moving else 0.0
+        bob = abs(step) * 3 if self.moving else (math.sin(time.time() * 2) * 1.2 if sleeping else 0)
+        if self.state == "dance":
+            bob = abs(math.sin(self.dance_frames * 0.35)) * 10
+        elif self.state == "idle" and self.happy_frames:
             bob = abs(math.sin(self.happy_frames * 0.4)) * 8  # happy hops
 
         body_w, body_h = 76.0, 62.0
+        if self.squash_frames:
+            body_w, body_h = 86.0, 52.0
+        elif airborne and self.vy < -4:
+            body_w, body_h = 70.0, 68.0   # stretch while rising
         body_cy = GROUND - 12 - body_h / 2 - bob
-        if dragged:
-            body_cy += math.sin(time.time() * 10) * 2
 
-        # Shadow
-        if not dragged and self.state != "fall":
+        # Shadow stays flat on the floor (only when on the floor)
+        if self.on_ground():
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(0, 0, 0, 45))
             p.drawEllipse(QPointF(cx, GROUND - 2), 32 - bob, 5)
 
-        color = BODY
-        if self.tired:
-            color = BODY_TIRED
+        p.save()
+        p.translate(cx, PIVOT)
+        p.rotate(self.tilt)
+        p.translate(-cx, -PIVOT)
+
+        color = BODY_TIRED if self.tired else BODY
         color = blend(color, BODY_HOT, self.hot)
+        if self.angry_frames:
+            color = blend(color, BODY_ANGRY, 0.85)
         outline = color.darker(170)
 
-        # Feet (dangle when dragged)
+        # Feet: kick while dangling, walk on the ground
         p.setPen(QPen(outline, 2.5))
         p.setBrush(color.darker(115))
-        if dragged or self.state == "fall":
-            for fx in (-16, 16):
-                p.drawEllipse(QPointF(cx + fx, body_cy + body_h / 2 + 8), 8, 7)
+        if dragged or airborne:
+            kick = math.sin(time.time() * 14) * 4 if dragged else 0
+            p.drawEllipse(QPointF(cx - 16, body_cy + body_h / 2 + 8 + kick), 8, 7)
+            p.drawEllipse(QPointF(cx + 16, body_cy + body_h / 2 + 8 - kick), 8, 7)
         elif not sleeping:
             p.drawEllipse(QPointF(cx - 16 + step * 7, GROUND - 7 - max(0, step) * 4), 11, 7)
             p.drawEllipse(QPointF(cx + 16 - step * 7, GROUND - 7 - max(0, -step) * 4), 11, 7)
 
-        # Ears
-        tilt = 3 * self.dir if walking else 0
+        # Ears perk up when the cursor is close, droop when asleep or sad
+        c = self.centre()
+        near = math.hypot(self.cursor.x() - c.x(), self.cursor.y() - c.y()) < 160
+        perk = -5 if (near or self.hovering) and not sleeping else 0
+        droop = 6 if sleeping or self.sad_frames or self.tired else 0
+        tilt = 3 * self.dir if self.moving else 0
         for side in (-1, 1):
-            ear = QPainterPath()
             base_x = cx + side * 22
-            ear.moveTo(base_x - 13, body_cy - body_h / 2 + 12)
-            ear.lineTo(base_x + side * 6 + tilt, body_cy - body_h / 2 - 18 + (6 if sleeping else 0))
-            ear.lineTo(base_x + 13, body_cy - body_h / 2 + 8)
+            top = body_cy - body_h / 2
+            ear = QPainterPath()
+            ear.moveTo(base_x - 13, top + 12)
+            ear.lineTo(base_x + side * (6 + droop) + tilt, top - 18 + droop + perk)
+            ear.lineTo(base_x + 13, top + 8)
             ear.closeSubpath()
             p.setBrush(color)
             p.drawPath(ear)
             inner = QPainterPath()
-            inner.moveTo(base_x - 6, body_cy - body_h / 2 + 8)
-            inner.lineTo(base_x + side * 4 + tilt, body_cy - body_h / 2 - 9 + (6 if sleeping else 0))
-            inner.lineTo(base_x + 6, body_cy - body_h / 2 + 6)
+            inner.moveTo(base_x - 6, top + 8)
+            inner.lineTo(base_x + side * (4 + droop) + tilt, top - 9 + droop + perk)
+            inner.lineTo(base_x + 6, top + 6)
             inner.closeSubpath()
             p.setPen(Qt.NoPen)
             p.setBrush(CHEEK)
@@ -629,19 +943,36 @@ class Pet(QWidget):
         p.setBrush(QColor(255, 255, 255, 70))
         p.drawEllipse(QPointF(cx, body_cy + 14), 20, 12)
 
-        # Cheeks
-        p.setBrush(QColor(255, 120, 120, 150) if self.happy_frames else CHEEK)
+        # Cheeks (blush when happy or being hovered)
+        blush = self.happy_frames or self.hovering
+        p.setBrush(QColor(255, 120, 120, 170) if blush else CHEEK)
         p.drawEllipse(QPointF(cx - 24, body_cy + 4), 7, 4.5)
         p.drawEllipse(QPointF(cx + 24, body_cy + 4), 7, 4.5)
 
-        self.draw_face(p, cx, body_cy, sleeping, dragged)
+        self.draw_face(p, cx, body_cy, sleeping, dragged or airborne)
+        if self.dizzy_frames:
+            self.draw_stars(p, cx, body_cy - body_h / 2 - 8)
+        p.restore()
 
-    def draw_face(self, p, cx, cy, sleeping, dragged):
+    def draw_face(self, p, cx, cy, sleeping, flying):
         eye_y = cy - 5
         pen = QPen(INK, 2.5, Qt.SolidLine, Qt.RoundCap)
         closed = sleeping or self.blink > 0 or self.tired and self.blink_wait % 90 < 30
 
-        if self.happy_frames and not sleeping:
+        if self.dizzy_frames:
+            # Spiral eyes
+            p.setPen(QPen(INK, 2))
+            p.setBrush(Qt.NoBrush)
+            spin = self.dizzy_frames * 0.4
+            for ex in (-13, 13):
+                path = QPainterPath()
+                for i in range(40):
+                    a = spin + i * 0.35
+                    r = 0.2 * i
+                    pt = QPointF(cx + ex + math.cos(a) * r, eye_y + math.sin(a) * r)
+                    path.moveTo(pt) if i == 0 else path.lineTo(pt)
+                p.drawPath(path)
+        elif self.happy_frames and not sleeping and not self.angry_frames:
             # ^ ^ eyes
             p.setPen(pen)
             p.setBrush(Qt.NoBrush)
@@ -661,13 +992,12 @@ class Pet(QWidget):
         else:
             # Look at the mouse when it's close, otherwise where we're walking
             look = QPointF(self.dir * 2.5, 0)
-            cursor = QCursor.pos()
-            gx, gy = self.px + cx, self.py + cy
-            dx, dy = cursor.x() - gx, cursor.y() - gy
+            c = self.centre()
+            dx, dy = self.cursor.x() - c.x(), self.cursor.y() - c.y()
             dist = math.hypot(dx, dy)
-            if 0 < dist < 350:
+            if 0 < dist < 450:
                 look = QPointF(dx / dist * 3, dy / dist * 3)
-            size = 8.5 if self.surprised_frames or dragged else 7
+            size = 8.5 if self.surprised_frames or flying else 7
             for ex in (-13, 13):
                 p.setPen(Qt.NoPen)
                 p.setBrush(QColor("white"))
@@ -677,6 +1007,12 @@ class Pet(QWidget):
                 p.setBrush(QColor("white"))
                 p.drawEllipse(QPointF(cx + ex + look.x() + 1.5, eye_y + look.y() - 1.8), 1.4, 1.4)
 
+        if self.angry_frames:
+            # Cross eyebrows
+            p.setPen(QPen(INK, 3, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(QPointF(cx - 21, eye_y - 12), QPointF(cx - 7, eye_y - 7))
+            p.drawLine(QPointF(cx + 21, eye_y - 12), QPointF(cx + 7, eye_y - 7))
+
         # Mouth
         mouth_y = cy + 8
         p.setPen(QPen(INK, 2.2, Qt.SolidLine, Qt.RoundCap))
@@ -684,7 +1020,20 @@ class Pet(QWidget):
             chew = 2 + abs(math.sin(self.eating_frames * 0.6)) * 3
             p.setBrush(QColor("#7a2e2e"))
             p.drawEllipse(QPointF(cx, mouth_y + 1), 4, chew)
-        elif self.surprised_frames or dragged:
+        elif self.angry_frames:
+            p.setBrush(Qt.NoBrush)
+            path = QPainterPath()
+            path.moveTo(cx - 6, mouth_y + 3)
+            path.quadTo(cx, mouth_y - 2, cx + 6, mouth_y + 3)
+            p.drawPath(path)
+        elif self.dizzy_frames:
+            p.setBrush(Qt.NoBrush)
+            path = QPainterPath()
+            path.moveTo(cx - 7, mouth_y + 2)
+            for i in range(1, 5):
+                path.lineTo(cx - 7 + i * 3.5, mouth_y + (0 if i % 2 else 3))
+            p.drawPath(path)
+        elif self.surprised_frames or flying:
             p.setBrush(QColor("#7a2e2e"))
             p.drawEllipse(QPointF(cx, mouth_y + 2), 3.5, 4.5)
         elif sleeping:
@@ -694,9 +1043,25 @@ class Pet(QWidget):
             p.setBrush(Qt.NoBrush)
             path = QPainterPath()
             sad = self.sad_frames > 0 or self.tired
-            curve = -4 if sad else (6 if self.happy_frames else 4)
+            curve = -4 if sad else (6 if self.happy_frames or self.hovering else 4)
             path.moveTo(cx - 6, mouth_y + (3 if sad else 0))
             path.quadTo(cx, mouth_y + curve, cx + 6, mouth_y + (3 if sad else 0))
+            p.drawPath(path)
+
+    def draw_stars(self, p, cx, y):
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#ffd23f"))
+        t = time.time() * 5
+        for i in range(3):
+            a = t + i * 2 * math.pi / 3
+            sx, sy = cx + math.cos(a) * 30, y + math.sin(a) * 7
+            path = QPainterPath()
+            for k in range(10):
+                r = 6 if k % 2 == 0 else 2.5
+                ang = -math.pi / 2 + k * math.pi / 5
+                pt = QPointF(sx + math.cos(ang) * r, sy + math.sin(ang) * r)
+                path.moveTo(pt) if k == 0 else path.lineTo(pt)
+            path.closeSubpath()
             p.drawPath(path)
 
     def draw_particles(self, p):
@@ -726,6 +1091,21 @@ class Pet(QWidget):
                 path.quadTo(x + 4, y + 1, x, y + 3)
                 path.quadTo(x - 4, y + 1, x, y - 5)
                 p.drawPath(path)
+            elif kind == "puff":
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(150, 150, 150, alpha // 2))
+                r = 3 + (FPS - life) / 5
+                p.drawEllipse(QPointF(x, y), r, r)
+            elif kind == "dust":
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(160, 150, 140, alpha // 2))
+                p.drawEllipse(QPointF(x, y), 3, 3)
+            elif kind == "note":
+                p.setPen(QPen(QColor(90, 70, 160, alpha), 2))
+                p.setBrush(QColor(90, 70, 160, alpha))
+                p.drawEllipse(QPointF(x, y), 3.5, 2.8)
+                p.drawLine(QPointF(x + 3.2, y), QPointF(x + 3.2, y - 11))
+                p.drawLine(QPointF(x + 3.2, y - 11), QPointF(x + 8, y - 8))
 
     def draw_bubble(self, p):
         font = self.bubble_font()
