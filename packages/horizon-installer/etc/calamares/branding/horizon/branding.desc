@@ -1,0 +1,36 @@
+---
+componentName: horizon
+
+welcomeStyleCalamares: false
+welcomeExpandingLogo: true
+windowExpanding: normal
+windowSize: 1100px,720px
+windowPlacement: center
+sidebar: widget
+navigation: widget
+
+strings:
+    productName:         "@DISTRO_NAME@"
+    shortProductName:    "@DISTRO_NAME@"
+    version:             "@DISTRO_VERSION@"
+    shortVersion:        "@DISTRO_VERSION@"
+    versionedName:       "@DISTRO_NAME@ @DISTRO_VERSION@"
+    shortVersionedName:  "@DISTRO_NAME@ @DISTRO_VERSION@"
+    bootloaderEntryName: "@DISTRO_NAME@"
+    productUrl:          "@DISTRO_URL@"
+    supportUrl:          "@DISTRO_URL@/issues"
+    releaseNotesUrl:     "@DISTRO_URL@"
+
+images:
+    productLogo:    "logo.png"
+    productIcon:    "logo.png"
+    productWelcome: "welcome.png"
+
+slideshow:    "show.qml"
+slideshowAPI: 1
+
+style:
+    SidebarBackground:        "#1d1b4b"
+    SidebarText:              "#FFFFFF"
+    SidebarTextCurrent:       "#1d1b4b"
+    SidebarBackgroundCurrent: "#FFFFFF"

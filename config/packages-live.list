@@ -1,0 +1,3 @@
+# Packages only needed on the live ISO. They are removed from the installed
+# system by the installer (see packages/horizon-installer/etc/calamares/modules/packages.conf).
+calamares

@@ -1,0 +1,70 @@
+name: Build ISO
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths-ignore: ["**.md"]
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck -S warning build.sh scripts/*.sh packages/*/DEBIAN/*inst packages/*/DEBIAN/postrm packages/horizon-installer/usr/bin/horizon-install
+      - name: Python syntax
+        run: python3 -m py_compile packages/horizon-desktop/usr/bin/horizon-settings
+      - name: Calamares YAML
+        run: |
+          pip install pyyaml
+          python3 -c "import glob,yaml; [yaml.safe_load(open(f)) for f in glob.glob('packages/horizon-installer/etc/calamares/**/*.conf', recursive=True)]"
+      - name: Build packages
+        run: |
+          sudo apt-get install -y librsvg2-bin
+          sudo ./build.sh debs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debs
+          path: build/debs/*.deb
+
+  iso:
+    needs: lint
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force || true
+          df -h /
+      - uses: actions/checkout@v4
+      - name: Build ISO
+        run: sudo ./build.sh all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iso
+          path: |
+            build/*.iso
+            build/*.iso.sha256
+          compression-level: 0
+      # GitHub release assets are limited to 2 GB, so larger ISOs are split.
+      # Re-join with:  cat horizon-*.iso.part* > horizon.iso
+      - name: Split ISO for release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          cd build
+          for f in *.iso; do
+            if [ "$(stat -c%s "$f")" -gt 2000000000 ]; then
+              sudo split -b 1900M -d "$f" "$f.part" && sudo rm "$f"
+            fi
+          done
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/*.iso*

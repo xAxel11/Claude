@@ -1,0 +1,5 @@
+# KRunner is our "Spotlight": centered, open it with Alt+Space.
+[General]
+FreeFloating=true
+ActivateWhenTypingOnDesktop=true
+historyBehavior=CompletionSuggestion

@@ -1,0 +1,14 @@
+{
+    "KPackageStructure": "Plasma/LookAndFeel",
+    "KPlugin": {
+        "Authors": [{ "Name": "@DISTRO_NAME@ developers" }],
+        "Category": "",
+        "Description": "macOS-style layout: top menu bar and floating dock",
+        "Id": "org.horizon.desktop",
+        "License": "GPL-2.0+",
+        "Name": "@DISTRO_NAME@",
+        "Version": "@DISTRO_VERSION@",
+        "Website": "@DISTRO_URL@"
+    },
+    "X-Plasma-APIVersion": "2"
+}

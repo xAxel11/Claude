@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8ec5ff"/>
+      <stop offset="0.6" stop-color="#c7b7ff"/>
+      <stop offset="1" stop-color="#ffd1e8"/>
+    </linearGradient>
+    <radialGradient id="sun" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#fff4d6" stop-opacity="0.95"/>
+      <stop offset="0.18" stop-color="#fff4d6" stop-opacity="0.5"/>
+      <stop offset="0.5" stop-color="#fff4d6" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#fff4d6" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="w1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6aa7ff"/><stop offset="1" stop-color="#a07cff"/>
+    </linearGradient>
+    <linearGradient id="w2" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#b36bff"/><stop offset="1" stop-color="#ff7eb6"/>
+    </linearGradient>
+    <linearGradient id="w3" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5b6cff"/><stop offset="1" stop-color="#ff6f9f"/>
+    </linearGradient>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#sky)"/>
+  <circle cx="1180" cy="560" r="700" fill="url(#sun)"/>
+  <path opacity="0.9" fill="url(#w1)"
+        d="M-200 640 L0 610 C 320 520 560 700 900 640 S 1500 470 1920 560 L2120 560 L2120 1180 L-200 1180 Z"/>
+  <path opacity="0.92" fill="url(#w2)"
+        d="M0 760 C 380 640 700 860 1060 780 S 1640 640 1920 720 L1920 1080 L0 1080 Z"/>
+  <path opacity="0.96" fill="url(#w3)"
+        d="M0 900 C 420 820 820 980 1220 900 S 1720 840 1920 880 L1920 1080 L0 1080 Z"/>
+</svg>

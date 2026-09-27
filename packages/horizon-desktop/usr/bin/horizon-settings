@@ -1,0 +1,1005 @@
+#!/usr/bin/env python3
+"""Horizon Settings — the friendly control panel of @DISTRO_NAME@.
+
+One place for the things people change most: light/dark mode, accent colour,
+the dock, panel layouts, window buttons and animations. Everything is applied
+live through Plasma's own tools and D-Bus APIs, so System Settings stays in
+sync and nothing here is a hack that breaks on upgrade.
+
+    horizon-settings                 open the app
+    horizon-settings --page dock     open a specific page
+    horizon-settings --welcome       autostart entry: show the welcome page once
+"""
+
+import argparse
+import glob
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+from PyQt6.QtCore import QSize, Qt, QTimer
+from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
+from PyQt6.QtWidgets import (
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame,
+    QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QMainWindow, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSlider,
+    QStackedWidget, QToolButton, QVBoxLayout, QWidget,
+)
+
+try:
+    from PyQt6.QtDBus import QDBusConnection, QDBusInterface
+except ImportError:  # pragma: no cover - fall back to dbus-send
+    QDBusConnection = None
+
+DISTRO_NAME = "@DISTRO_NAME@"  # filled in by build.sh
+if DISTRO_NAME.startswith("@"):
+    DISTRO_NAME = "Horizon OS"
+APP_NAME = "Horizon Settings"
+CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+LAYOUT_DIR = Path("/usr/share/horizon/layouts")
+TASK_WIDGETS = ("org.kde.plasma.icontasks", "org.kde.plasma.taskmanager")
+
+ACCENTS = [
+    ("Blue", "#007AFF"), ("Purple", "#AF52DE"), ("Pink", "#FF2D55"),
+    ("Red", "#FF3B30"), ("Orange", "#FF9500"), ("Yellow", "#FFCC00"),
+    ("Green", "#34C759"), ("Graphite", "#8E8E93"),
+]
+
+# Theme pieces for light/dark mode. The first candidate that is installed wins,
+# so the app keeps working if an upstream theme renames a variant.
+THEME_VARIANTS = {
+    "light": {
+        "colorscheme": ["WhiteSur", "WhiteSurLight", "BreezeLight"],
+        "desktoptheme": ["WhiteSur", "WhiteSur-light", "default"],
+        "decoration": ["WhiteSur", "WhiteSur-light"],
+        "kvantum": ["WhiteSur", "WhiteSurLight"],
+        "icons": ["WhiteSur", "WhiteSur-light", "breeze"],
+    },
+    "dark": {
+        "colorscheme": ["WhiteSurDark", "WhiteSur-dark", "BreezeDark"],
+        "desktoptheme": ["WhiteSur-dark", "WhiteSurDark", "breeze-dark"],
+        "decoration": ["WhiteSur-dark", "WhiteSurDark"],
+        "kvantum": ["WhiteSurDark", "WhiteSur-dark"],
+        "icons": ["WhiteSur-dark", "WhiteSurDark", "breeze-dark"],
+    },
+}
+
+ANIMATION_SPEEDS = [  # (label, AnimationDurationFactor)
+    ("Off", 0.0), ("Instant", 0.25), ("Fast", 0.5), ("Snappy", 0.7),
+    ("Default", 0.85), ("Relaxed", 1.25), ("Slow", 2.0),
+]
+MINIMIZE_EFFECTS = [("Genie (macOS)", "magiclamp"), ("Squash", "squash"), ("None", None)]
+OPEN_EFFECTS = [("Scale", "scale"), ("Glide", "glide"), ("Fade", "fade"), ("None", None)]
+DOCK_HIDING = [("Always visible", "none"), ("Hide when a window touches it", "dodgewindows"),
+               ("Hide automatically", "autohide")]
+LAYOUTS = [
+    ("macos", "macOS", "Menu bar on top, floating dock at the bottom."),
+    ("focus", "Focus", "Slim top bar with a centered clock and an auto-hiding dock."),
+    ("windows", "Classic", "One panel with a start menu, task bar and tray."),
+]
+
+
+# --------------------------------------------------------------------------
+# KDE config files
+# --------------------------------------------------------------------------
+
+def _config_paths(name):
+    return [CONFIG_HOME / name] + [Path(d) / name for d in
+                                   os.environ.get("XDG_CONFIG_DIRS", "/etc/xdg").split(":")]
+
+
+def _header(groups):
+    return "".join(f"[{g}]" for g in groups)
+
+
+def kread(name, groups, key, default=None):
+    """Read a KConfig value, honouring user config over /etc/xdg defaults."""
+    want = _header(groups)
+    for path in _config_paths(name):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        current = None
+        for line in lines:
+            s = line.strip()
+            if s.startswith("["):
+                current = s
+            elif current == want and "=" in s:
+                k, v = s.split("=", 1)
+                if k.strip().split("[$")[0] == key:
+                    return v
+    return default
+
+
+def kwrite(name, groups, key, value):
+    """Write (or delete with value=None) a key in ~/.config/<name>."""
+    tool = shutil.which("kwriteconfig6")
+    if tool:
+        cmd = [tool, "--file", name]
+        for g in groups:
+            cmd += ["--group", g]
+        cmd += ["--key", key]
+        cmd += ["--delete"] if value is None else ["--notify", str(value)]
+        if subprocess.run(cmd, check=False).returncode == 0:
+            return
+
+    path = CONFIG_HOME / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    want = _header(groups)
+    start = end = None
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s == want:
+            start, end = i, len(lines)
+        elif start is not None and s.startswith("[") and i > start:
+            end = i
+            break
+    entry = None if value is None else f"{key}={value}"
+    if start is None:
+        if entry:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines += [want, entry]
+    else:
+        for i in range(start + 1, end):
+            if lines[i].split("=", 1)[0].strip() == key:
+                if entry:
+                    lines[i] = entry
+                else:
+                    del lines[i]
+                break
+        else:
+            if entry:
+                insert = end
+                while insert > start + 1 and not lines[insert - 1].strip():
+                    insert -= 1
+                lines.insert(insert, entry)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+# --------------------------------------------------------------------------
+# Talking to Plasma
+# --------------------------------------------------------------------------
+
+def run(*cmd):
+    try:
+        return subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"horizon-settings: {cmd[0]}: {exc}", file=sys.stderr)
+        return None
+
+
+def dbus_call(service, path, interface, method, *args):
+    """Call a session-bus method; returns the first reply argument or None."""
+    if QDBusConnection is not None:
+        iface = QDBusInterface(service, path, interface, QDBusConnection.sessionBus())
+        if iface.isValid():
+            reply = iface.call(method, *args)
+            values = reply.arguments()
+            return values[0] if values else None
+    cmd = ["dbus-send", "--session", "--print-reply", f"--dest={service}", path, f"{interface}.{method}"]
+    for a in args:
+        cmd.append(f"boolean:{str(a).lower()}" if isinstance(a, bool) else f"string:{a}")
+    res = run(*cmd)
+    if res and res.returncode == 0:
+        out = res.stdout.split("string ", 1)
+        if len(out) == 2:
+            return out[1].strip().strip('"')
+    return None
+
+
+def plasma_script(script):
+    return dbus_call("org.kde.plasmashell", "/PlasmaShell", "org.kde.PlasmaShell", "evaluateScript", script)
+
+
+def kwin_reconfigure():
+    dbus_call("org.kde.KWin", "/KWin", "org.kde.KWin", "reconfigure")
+
+
+def kwin_effect(name, enabled):
+    kwrite("kwinrc", ["Plugins"], f"{name}Enabled", "true" if enabled else "false")
+    dbus_call("org.kde.KWin", "/Effects", "org.kde.kwin.Effects",
+              "loadEffect" if enabled else "unloadEffect", name)
+
+
+def libexec(tool):
+    for pattern in (f"/usr/lib/*/libexec/{tool}", f"/usr/libexec/{tool}", f"/usr/lib/libexec/{tool}"):
+        hits = glob.glob(pattern)
+        if hits:
+            return hits[0]
+    return shutil.which(tool)
+
+
+def first_installed(kind, candidates):
+    roots = {
+        "colorscheme": ["/usr/share/color-schemes/{}.colors", "~/.local/share/color-schemes/{}.colors"],
+        "desktoptheme": ["/usr/share/plasma/desktoptheme/{}", "~/.local/share/plasma/desktoptheme/{}"],
+        "decoration": ["/usr/share/aurorae/themes/{}", "~/.local/share/aurorae/themes/{}"],
+        "kvantum": ["/usr/share/Kvantum/{}", "~/.config/Kvantum/{}"],
+        "icons": ["/usr/share/icons/{}/index.theme", "~/.local/share/icons/{}/index.theme"],
+    }[kind]
+    for name in candidates:
+        if any(Path(os.path.expanduser(r.format(name))).exists() for r in roots):
+            return name
+    return None
+
+
+def icon_themes():
+    names = set()
+    for base in ("/usr/share/icons", os.path.expanduser("~/.local/share/icons")):
+        for index in glob.glob(f"{base}/*/index.theme"):
+            text = Path(index).read_text(errors="ignore")
+            if "Directories=" in text and "cursors" not in Path(index).parent.name.lower():
+                names.add(Path(index).parent.name)
+    names.discard("default")
+    names.discard("hicolor")
+    return sorted(names, key=str.lower)
+
+
+def is_live_session():
+    try:
+        return "boot=casper" in Path("/proc/cmdline").read_text()
+    except OSError:
+        return False
+
+
+def os_release():
+    info = {}
+    for p in ("/etc/os-release", "/usr/lib/os-release"):
+        try:
+            for line in Path(p).read_text().splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    info[k] = v.strip().strip('"')
+            break
+        except OSError:
+            continue
+    return info
+
+
+# --------------------------------------------------------------------------
+# Small UI building blocks
+# --------------------------------------------------------------------------
+
+def heading(text, size=20):
+    label = QLabel(text)
+    font = label.font()
+    font.setPointSizeF(size * 0.75 + 3)
+    font.setWeight(QFont.Weight.DemiBold)
+    label.setFont(font)
+    return label
+
+
+def muted(text):
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet("color: palette(placeholder-text);")
+    return label
+
+
+class Card(QFrame):
+    """A rounded group box, like a section in macOS System Settings."""
+
+    def __init__(self, title=None):
+        super().__init__()
+        self.setObjectName("card")
+        self.box = QVBoxLayout(self)
+        self.box.setContentsMargins(18, 14, 18, 16)
+        self.box.setSpacing(10)
+        if title:
+            self.box.addWidget(heading(title, 13))
+
+    def row(self, label, widget, hint=None):
+        line = QHBoxLayout()
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        text.addWidget(QLabel(label))
+        if hint:
+            text.addWidget(muted(hint))
+        line.addLayout(text, 1)
+        line.addWidget(widget, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.box.addLayout(line)
+        return widget
+
+
+class Page(QScrollArea):
+    def __init__(self, title, subtitle=None):
+        super().__init__()
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        inner = QWidget()
+        self.box = QVBoxLayout(inner)
+        self.box.setContentsMargins(28, 24, 28, 24)
+        self.box.setSpacing(16)
+        self.box.addWidget(heading(title, 26))
+        if subtitle:
+            self.box.addWidget(muted(subtitle))
+        self.setWidget(inner)
+
+    def add(self, widget):
+        self.box.addWidget(widget)
+        return widget
+
+    def finish(self):
+        self.box.addStretch(1)
+
+
+def swatch_icon(color, selected=False, size=28):
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(color))
+    p.drawEllipse(2, 2, size - 4, size - 4)
+    if selected:
+        p.setBrush(QColor("white"))
+        p.drawEllipse(size // 2 - 4, size // 2 - 4, 8, 8)
+    p.end()
+    return QIcon(pix)
+
+
+class ChoiceCards(QWidget):
+    """Big clickable cards (e.g. Light / Dark) — exactly one is selected."""
+
+    def __init__(self, options, on_pick, icon_size=QSize(150, 90)):
+        super().__init__()
+        self.group = QButtonGroup(self)
+        self.group.setExclusive(True)
+        grid = QHBoxLayout(self)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(14)
+        self.buttons = {}
+        for key, label, icon in options:
+            btn = QToolButton()
+            btn.setText(label)
+            btn.setCheckable(True)
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            btn.setIconSize(icon_size)
+            if icon is not None:
+                btn.setIcon(icon)
+            btn.setObjectName("choice")
+            btn.clicked.connect(lambda _=False, k=key: on_pick(k))
+            self.group.addButton(btn)
+            self.buttons[key] = btn
+            grid.addWidget(btn)
+        grid.addStretch(1)
+
+    def select(self, key):
+        if key in self.buttons:
+            self.buttons[key].setChecked(True)
+
+
+def mode_preview(dark):
+    """Tiny drawing of a desktop in light or dark mode."""
+    w, h = 150, 90
+    pix = QPixmap(w, h)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor("#1d1b4b" if dark else "#a9c8ff"))
+    p.drawRoundedRect(0, 0, w, h, 10, 10)
+    p.setBrush(QColor("#2b2b30" if dark else "#f5f5f7"))
+    p.drawRect(0, 0, w, 9)
+    p.drawRoundedRect(22, 20, 90, 50, 6, 6)
+    for i, c in enumerate(("#ff5f57", "#febc2e", "#28c840")):
+        p.setBrush(QColor(c))
+        p.drawEllipse(28 + i * 9, 25, 6, 6)
+    p.setBrush(QColor(255, 255, 255, 90 if dark else 160))
+    p.drawRoundedRect(45, 76, 60, 11, 4, 4)
+    p.end()
+    return QIcon(pix)
+
+
+def titlebar_preview(side):
+    w, h = 150, 40
+    pix = QPixmap(w, h)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QColor(0, 0, 0, 40))
+    p.setBrush(QColor("#f5f5f7"))
+    p.drawRoundedRect(1, 1, w - 2, h - 2, 8, 8)
+    p.setPen(Qt.PenStyle.NoPen)
+    x0 = 10 if side == "left" else w - 44
+    colors = ("#ff5f57", "#febc2e", "#28c840") if side == "left" else ("#febc2e", "#28c840", "#ff5f57")
+    for i, c in enumerate(colors):
+        p.setBrush(QColor(c))
+        p.drawEllipse(x0 + i * 12, 15, 10, 10)
+    p.setBrush(QColor(0, 0, 0, 50))
+    p.drawRoundedRect(55, 17, 40, 6, 3, 3)
+    p.end()
+    return QIcon(pix)
+
+
+def layout_preview(key):
+    w, h = 150, 90
+    pix = QPixmap(w, h)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor("#6f8fe8"))
+    p.drawRoundedRect(0, 0, w, h, 10, 10)
+    bar = QColor(255, 255, 255, 220)
+    p.setBrush(bar)
+    if key == "macos":
+        p.drawRect(0, 0, w, 8)
+        p.drawRoundedRect(40, 74, 70, 12, 4, 4)
+    elif key == "focus":
+        p.drawRect(0, 0, w, 7)
+        p.setBrush(QColor(255, 255, 255, 90))
+        p.drawRoundedRect(50, 77, 50, 9, 4, 4)
+    else:
+        p.drawRoundedRect(4, 74, w - 8, 12, 4, 4)
+        p.setBrush(QColor("#0a84ff"))
+        p.drawEllipse(9, 76, 8, 8)
+    p.end()
+    return QIcon(pix)
+
+
+# --------------------------------------------------------------------------
+# Pages
+# --------------------------------------------------------------------------
+
+class WelcomePage(Page):
+    def __init__(self, window):
+        super().__init__(f"Welcome to {DISTRO_NAME}")
+        self.main = window
+        logo = QLabel()
+        logo.setPixmap(QIcon.fromTheme("horizon-logo").pixmap(96, 96))
+        self.box.insertWidget(0, logo)
+        self.add(muted("A beautiful, private and fast desktop built on Ubuntu. "
+                       "Here are a few things to get you started."))
+
+        if is_live_session():
+            card = self.add(Card("You are running the live system"))
+            card.box.addWidget(muted("Nothing is changed on your computer until you install. "
+                                     "The installer guides you through partitioning, your account and more."))
+            btn = QPushButton(QIcon.fromTheme("system-software-install"), f"  Install {DISTRO_NAME}…")
+            btn.setObjectName("primary")
+            btn.setMinimumHeight(38)
+            btn.clicked.connect(self.install)
+            card.box.addWidget(btn, 0, Qt.AlignmentFlag.AlignLeft)
+
+        steps = self.add(Card("Make it yours"))
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        items = [
+            ("preferences-desktop-theme", "Light or dark", "appearance"),
+            ("preferences-desktop", "Dock && layout", "dock"),
+            ("preferences-system-windows-effect", "Animations", "windows"),
+            ("plasmadiscover", "Get apps", None),
+        ]
+        for i, (icon, text, page) in enumerate(items):
+            b = QToolButton()
+            b.setIcon(QIcon.fromTheme(icon, QIcon.fromTheme("preferences-system")))
+            b.setIconSize(QSize(40, 40))
+            b.setText(text)
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            b.setMinimumSize(130, 90)
+            b.setObjectName("choice")
+            if page:
+                b.clicked.connect(lambda _=False, pg=page: self.main.show_page(pg))
+            else:
+                b.clicked.connect(lambda: subprocess.Popen(["plasma-discover"]))
+            grid.addWidget(b, 0, i)
+        steps.box.addLayout(grid)
+
+        tips = self.add(Card("Handy shortcuts"))
+        for keys, what in [
+            ("Alt + Space", "Search apps, files and the web (like Spotlight)"),
+            ("Meta + W", "Overview of all windows and desktops (like Mission Control)"),
+            ("Meta", "Open the application menu"),
+            ("Meta + Ctrl + ← / →", "Switch between desktops"),
+            ("Meta + Print", "Take a screenshot"),
+        ]:
+            line = QHBoxLayout()
+            k = QLabel(keys)
+            k.setObjectName("kbd")
+            k.setMinimumWidth(170)
+            line.addWidget(k)
+            line.addWidget(QLabel(what), 1)
+            tips.box.addLayout(line)
+
+        self.startup = QCheckBox("Show this welcome screen when I log in")
+        self.startup.setChecked(kread("horizon-settingsrc", ["Welcome"], "ShowOnStartup", "false") == "true")
+        self.startup.toggled.connect(
+            lambda on: kwrite("horizon-settingsrc", ["Welcome"], "ShowOnStartup", "true" if on else "false"))
+        self.add(self.startup)
+        self.finish()
+
+    def install(self):
+        for cmd in (["horizon-install"], ["sudo", "-E", "calamares"]):
+            if shutil.which(cmd[0]):
+                subprocess.Popen(cmd)
+                return
+        QMessageBox.warning(self, APP_NAME, "The installer is not available on this system.")
+
+
+class AppearancePage(Page):
+    def __init__(self):
+        super().__init__("Appearance", "Choose how your desktop looks. Changes apply instantly.")
+
+        mode = self.add(Card("Mode"))
+        self.modes = ChoiceCards(
+            [("light", "Light", mode_preview(False)), ("dark", "Dark", mode_preview(True))],
+            self.set_mode)
+        mode.box.addWidget(self.modes)
+        scheme = kread("kdeglobals", ["General"], "ColorScheme", "WhiteSur") or ""
+        self.modes.select("dark" if "dark" in scheme.lower() else "light")
+
+        accent = self.add(Card("Accent colour"))
+        accent.box.addWidget(muted("Used for buttons, selections and highlights."))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.accent_buttons = {}
+        current = (kread("kdeglobals", ["General"], "AccentColor", "") or "").lower()
+        for name, color in ACCENTS:
+            b = QToolButton()
+            b.setToolTip(name)
+            b.setIconSize(QSize(28, 28))
+            b.setAutoRaise(True)
+            b.clicked.connect(lambda _=False, c=color: self.set_accent(c))
+            self.accent_buttons[color] = b
+            row.addWidget(b)
+        row.addStretch(1)
+        accent.box.addLayout(row)
+        self.accent = self._match_accent(current)
+        self._paint_accents(self.accent)
+
+        misc = self.add(Card("Theme details"))
+        self.icons = QComboBox()
+        self.icons.addItems(icon_themes())
+        self.icons.setCurrentText(kread("kdeglobals", ["Icons"], "Theme", "WhiteSur"))
+        self.icons.currentTextChanged.connect(self.set_icons)
+        misc.row("Icons", self.icons)
+
+        wp = QPushButton("Choose picture…")
+        wp.clicked.connect(self.pick_wallpaper)
+        misc.row("Wallpaper", wp, "Or right-click the desktop → Desktop and Wallpaper")
+
+        reset_wp = QPushButton(f"Use {DISTRO_NAME} wallpaper")
+        reset_wp.clicked.connect(lambda: run("plasma-apply-wallpaperimage", "/usr/share/wallpapers/Horizon"))
+        misc.row("", reset_wp)
+        self.finish()
+
+    @staticmethod
+    def _match_accent(value):
+        for _, color in ACCENTS:
+            if value and QColor(value).name() == QColor(color).name():
+                return color
+        # KDE stores "r,g,b" — normalise.
+        if value and "," in value:
+            try:
+                r, g, b = (int(x) for x in value.split(",")[:3])
+                name = QColor(r, g, b).name()
+                for _, color in ACCENTS:
+                    if QColor(color).name() == name:
+                        return color
+            except ValueError:
+                pass
+        return ACCENTS[0][1] if not value else None
+
+    def _paint_accents(self, selected):
+        for color, b in self.accent_buttons.items():
+            b.setIcon(swatch_icon(color, color == selected))
+
+    def set_accent(self, color):
+        run("plasma-apply-colorscheme", "--accent-color", color)
+        self.accent = color
+        self._paint_accents(color)
+
+    def set_mode(self, mode):
+        v = THEME_VARIANTS[mode]
+        scheme = first_installed("colorscheme", v["colorscheme"])
+        if scheme:
+            run("plasma-apply-colorscheme", scheme)
+        theme = first_installed("desktoptheme", v["desktoptheme"])
+        if theme:
+            run("plasma-apply-desktoptheme", theme)
+        deco = first_installed("decoration", v["decoration"])
+        if deco:
+            kwrite("kwinrc", ["org.kde.kdecoration2"], "library", "org.kde.kwin.aurorae")
+            kwrite("kwinrc", ["org.kde.kdecoration2"], "theme", f"__aurorae__svg__{deco}")
+            kwin_reconfigure()
+        kv = first_installed("kvantum", v["kvantum"])
+        if kv:
+            kwrite("Kvantum/kvantum.kvconfig", ["General"], "theme", kv)
+        icons = first_installed("icons", v["icons"])
+        if icons:
+            self.icons.setCurrentText(icons)  # triggers set_icons
+        # Re-apply the chosen accent on top of the new scheme.
+        if self.accent:
+            run("plasma-apply-colorscheme", "--accent-color", self.accent)
+
+    def set_icons(self, name):
+        tool = libexec("plasma-changeicons")
+        if tool:
+            run(tool, name)
+        else:
+            kwrite("kdeglobals", ["Icons"], "Theme", name)
+
+    def pick_wallpaper(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a wallpaper", str(Path.home() / "Pictures"),
+            "Images (*.png *.jpg *.jpeg *.webp *.svg)")
+        if path:
+            run("plasma-apply-wallpaperimage", path)
+
+
+DOCK_QUERY = """
+var out = {found: false};
+panels().forEach(function (p) {
+    var isDock = %s.some(function (t) { return p.widgets(t).length > 0; });
+    if (isDock && !out.found) {
+        out = {found: true, location: p.location, height: p.height,
+               hiding: p.hiding, floating: p.floating};
+    }
+});
+print(JSON.stringify(out));
+""" % json.dumps(list(TASK_WIDGETS))
+
+DOCK_UPDATE = """
+panels().forEach(function (p) {
+    var isDock = %s.some(function (t) { return p.widgets(t).length > 0; });
+    if (isDock) { %s }
+});
+"""
+
+
+class DockPage(Page):
+    def __init__(self):
+        super().__init__("Dock & Layout", "Arrange your panels the way you like them.")
+
+        layouts = self.add(Card("Desktop layout"))
+        layouts.box.addWidget(muted("Replaces your current panels with a fresh preset."))
+        self.layout_cards = ChoiceCards(
+            [(k, name, layout_preview(k)) for k, name, _ in LAYOUTS if (LAYOUT_DIR / f"{k}.js").exists()]
+            or [(k, name, layout_preview(k)) for k, name, _ in LAYOUTS],
+            self.apply_layout)
+        layouts.box.addWidget(self.layout_cards)
+        for k, name, desc in LAYOUTS:
+            if k in self.layout_cards.buttons:
+                self.layout_cards.buttons[k].setToolTip(desc)
+
+        dock = self.add(Card("Dock"))
+        self.position = QComboBox()
+        for label, loc in (("Bottom", "bottom"), ("Left", "left"), ("Right", "right")):
+            self.position.addItem(label, loc)
+        dock.row("Position on screen", self.position)
+
+        self.size = QSlider(Qt.Orientation.Horizontal)
+        self.size.setRange(36, 110)
+        self.size.setMinimumWidth(220)
+        dock.row("Size", self.size)
+
+        self.hiding = QComboBox()
+        for label, value in DOCK_HIDING:
+            self.hiding.addItem(label, value)
+        dock.row("Visibility", self.hiding)
+
+        self.floating = QCheckBox()
+        dock.row("Floating", self.floating, "Leave a gap between the dock and the screen edge")
+
+        self._load_dock()
+        self.position.currentIndexChanged.connect(
+            lambda: self.update_dock(f'p.location = "{self.position.currentData()}";'))
+        self.hiding.currentIndexChanged.connect(
+            lambda: self.update_dock(f'p.hiding = "{self.hiding.currentData()}";'))
+        self.floating.toggled.connect(
+            lambda on: self.update_dock(f"p.floating = {'true' if on else 'false'};"))
+        # Debounce the size slider so Plasma isn't flooded while dragging.
+        self._size_timer = QTimer(self, singleShot=True, interval=250)
+        self._size_timer.timeout.connect(lambda: self.update_dock(f"p.height = {self.size.value()};"))
+        self.size.valueChanged.connect(lambda: self._size_timer.start())
+
+        more = self.add(Card())
+        btn = QPushButton("Edit panels and widgets…")
+        btn.clicked.connect(lambda: dbus_call(
+            "org.kde.plasmashell", "/PlasmaShell", "org.kde.PlasmaShell", "toggleWidgetExplorer"))
+        more.row("Add widgets, move icons or resize panels by hand", btn)
+        self.finish()
+
+    def _load_dock(self):
+        state = {}
+        try:
+            state = json.loads(plasma_script(DOCK_QUERY) or "{}")
+        except (TypeError, ValueError):
+            pass
+        widgets = (self.position, self.size, self.hiding, self.floating)
+        for w in widgets:
+            w.blockSignals(True)
+        self.position.setCurrentIndex(max(0, self.position.findData(state.get("location", "bottom"))))
+        self.size.setValue(int(state.get("height", 58)))
+        self.hiding.setCurrentIndex(max(0, self.hiding.findData(state.get("hiding", "dodgewindows"))))
+        self.floating.setChecked(bool(state.get("floating", True)))
+        for w in widgets:
+            w.blockSignals(False)
+        for w in widgets:
+            w.setEnabled(bool(state.get("found", False)) or not state)
+
+    def update_dock(self, js):
+        plasma_script(DOCK_UPDATE % (json.dumps(list(TASK_WIDGETS)), js))
+
+    def apply_layout(self, key):
+        path = LAYOUT_DIR / f"{key}.js"
+        if not path.exists():
+            QMessageBox.warning(self, APP_NAME, f"Layout file {path} is missing.")
+            return
+        answer = QMessageBox.question(
+            self, APP_NAME,
+            "Switch layout? Your current panels and their widgets will be replaced.")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        script = "panels().forEach(function (p) { p.remove(); });\n" + path.read_text()
+        plasma_script(script)
+        kwrite("horizon-settingsrc", ["Layout"], "Current", key)
+        QTimer.singleShot(1200, self._load_dock)
+
+
+class WindowsPage(Page):
+    def __init__(self):
+        super().__init__("Windows & Animations", "Tune how windows look, move and feel.")
+
+        buttons = self.add(Card("Title bar buttons"))
+        self.buttons = ChoiceCards(
+            [("left", "Left (macOS)", titlebar_preview("left")),
+             ("right", "Right (Windows)", titlebar_preview("right"))],
+            self.set_buttons, QSize(150, 40))
+        buttons.box.addWidget(self.buttons)
+        left = kread("kwinrc", ["org.kde.kdecoration2"], "ButtonsOnLeft", "XIA") or ""
+        self.buttons.select("left" if "X" in left else "right")
+
+        anim = self.add(Card("Animations"))
+        self.speed = QSlider(Qt.Orientation.Horizontal)
+        self.speed.setRange(0, len(ANIMATION_SPEEDS) - 1)
+        self.speed.setMinimumWidth(220)
+        self.speed.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.speed_label = QLabel()
+        self.speed_label.setMinimumWidth(70)
+        factor = float(kread("kdeglobals", ["KDE"], "AnimationDurationFactor", "0.85") or 0.85)
+        idx = min(range(len(ANIMATION_SPEEDS)), key=lambda i: abs(ANIMATION_SPEEDS[i][1] - factor))
+        self.speed.setValue(idx)
+        self.speed_label.setText(ANIMATION_SPEEDS[idx][0])
+        self.speed.valueChanged.connect(self.set_speed)
+        wrap = QWidget()
+        h = QHBoxLayout(wrap)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(self.speed)
+        h.addWidget(self.speed_label)
+        anim.row("Animation speed", wrap)
+
+        self.minimize = QComboBox()
+        for label, eff in MINIMIZE_EFFECTS:
+            self.minimize.addItem(label, eff)
+        self.minimize.setCurrentIndex(self._current_effect(MINIMIZE_EFFECTS))
+        self.minimize.currentIndexChanged.connect(
+            lambda: self.set_exclusive(MINIMIZE_EFFECTS, self.minimize.currentData()))
+        anim.row("Minimise effect", self.minimize)
+
+        self.opening = QComboBox()
+        for label, eff in OPEN_EFFECTS:
+            self.opening.addItem(label, eff)
+        self.opening.setCurrentIndex(self._current_effect(OPEN_EFFECTS))
+        self.opening.currentIndexChanged.connect(
+            lambda: self.set_exclusive(OPEN_EFFECTS, self.opening.currentData()))
+        anim.row("Open & close effect", self.opening)
+
+        fx = self.add(Card("Effects"))
+        for name, label, hint, default in [
+            ("blur", "Translucent blur", "Frosted-glass look for panels and menus", True),
+            ("wobblywindows", "Wobbly windows", "Windows bend like jelly while you drag them", False),
+            ("slide", "Slide between desktops", "Animate switching virtual desktops", True),
+            ("dimscreen", "Dim screen for admin prompts", "Focus attention on password dialogs", False),
+        ]:
+            box = QCheckBox()
+            box.setChecked(self._enabled(name, default))
+            box.toggled.connect(lambda on, n=name: self.toggle(n, on))
+            fx.row(label, box, hint)
+        self.finish()
+
+    @staticmethod
+    def _enabled(name, default):
+        return (kread("kwinrc", ["Plugins"], f"{name}Enabled", str(default).lower()) or "").lower() == "true"
+
+    def _current_effect(self, options):
+        defaults = {"magiclamp": True, "scale": True}
+        for i, (_, eff) in enumerate(options):
+            if eff and self._enabled(eff, defaults.get(eff, False)):
+                return i
+        return len(options) - 1
+
+    def set_exclusive(self, options, chosen):
+        for _, eff in options:
+            if eff:
+                kwin_effect(eff, eff == chosen)
+        kwin_reconfigure()
+
+    def toggle(self, name, on):
+        kwin_effect(name, on)
+        kwin_reconfigure()
+
+    def set_buttons(self, side):
+        if side == "left":
+            left, right = "XIA", ""
+        else:
+            left, right = "M", "IAX"
+        kwrite("kwinrc", ["org.kde.kdecoration2"], "ButtonsOnLeft", left)
+        kwrite("kwinrc", ["org.kde.kdecoration2"], "ButtonsOnRight", right)
+        kwin_reconfigure()
+
+    def set_speed(self, idx):
+        label, factor = ANIMATION_SPEEDS[idx]
+        self.speed_label.setText(label)
+        kwrite("kdeglobals", ["KDE"], "AnimationDurationFactor", factor)
+        kwin_reconfigure()
+
+
+class AboutPage(Page):
+    def __init__(self):
+        info = os_release()
+        super().__init__("About this computer")
+        top = QHBoxLayout()
+        logo = QLabel()
+        logo.setPixmap(QIcon.fromTheme("horizon-logo").pixmap(112, 112))
+        top.addWidget(logo)
+        text = QVBoxLayout()
+        text.addWidget(heading(info.get("NAME", DISTRO_NAME), 30))
+        text.addWidget(muted(f"Version {info.get('VERSION', '')}"))
+        text.addStretch(1)
+        top.addLayout(text, 1)
+        self.box.addLayout(top)
+
+        card = self.add(Card())
+        uname = os.uname()
+        mem = ""
+        try:
+            kb = int(next(l for l in open("/proc/meminfo") if l.startswith("MemTotal")).split()[1])
+            mem = f"{kb / 1024 / 1024:.1f} GB"
+        except (OSError, StopIteration, ValueError):
+            pass
+        cpu = ""
+        try:
+            cpu = next(l for l in open("/proc/cpuinfo") if l.startswith("model name")).split(":", 1)[1].strip()
+        except (OSError, StopIteration):
+            pass
+        plasma = run("plasmashell", "--version")
+        rows = [
+            ("Based on", f"Ubuntu {info.get('UBUNTU_CODENAME', '').capitalize()}"),
+            ("Desktop", plasma.stdout.strip().replace("plasmashell", "KDE Plasma") if plasma and plasma.stdout else "KDE Plasma"),
+            ("Kernel", uname.release),
+            ("Processor", cpu),
+            ("Memory", mem),
+            ("Computer name", uname.nodename),
+        ]
+        for k, v in rows:
+            if v:
+                label = QLabel(v)
+                label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                card.row(k, label)
+
+        more = self.add(Card())
+        adv = QPushButton("Open System Settings…")
+        adv.clicked.connect(lambda: subprocess.Popen(["systemsettings"]))
+        more.row("Every other option (displays, network, users, power…)", adv)
+        info_btn = QPushButton("Detailed system report…")
+        info_btn.clicked.connect(lambda: subprocess.Popen(["kinfocenter"]))
+        more.row("Hardware and driver details", info_btn)
+        self.finish()
+
+
+# --------------------------------------------------------------------------
+# Main window
+# --------------------------------------------------------------------------
+
+STYLE = """
+QListWidget#sidebar { border: none; background: transparent; padding: 8px; }
+QListWidget#sidebar::item { padding: 8px 10px; border-radius: 8px; margin: 1px 0; }
+QListWidget#sidebar::item:selected { background: palette(highlight); color: palette(highlighted-text); }
+QFrame#card { background: palette(base); border-radius: 12px; border: 1px solid palette(midlight); }
+QToolButton#choice { border: 2px solid transparent; border-radius: 12px; padding: 8px; }
+QToolButton#choice:hover { background: palette(midlight); }
+QToolButton#choice:checked { border-color: palette(highlight); }
+QPushButton#primary { background: palette(highlight); color: palette(highlighted-text);
+                      border-radius: 8px; padding: 6px 18px; font-weight: 600; }
+QLabel#kbd { font-family: monospace; }
+"""
+
+PAGES = [
+    ("welcome", "Welcome", "horizon-logo"),
+    ("appearance", "Appearance", "preferences-desktop-theme"),
+    ("dock", "Dock & Layout", "preferences-desktop"),
+    ("windows", "Windows & Animations", "preferences-system-windows-effect"),
+    ("about", "About", "help-about"),
+]
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(QIcon.fromTheme("horizon-logo"))
+        self.resize(980, 680)
+
+        central = QWidget()
+        h = QHBoxLayout(central)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(0)
+        self.sidebar = QListWidget()
+        self.sidebar.setObjectName("sidebar")
+        self.sidebar.setFixedWidth(230)
+        self.sidebar.setIconSize(QSize(22, 22))
+        self.stack = QStackedWidget()
+        h.addWidget(self.sidebar)
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.VLine)
+        line.setFrameShadow(QFrame.Shadow.Plain)
+        line.setStyleSheet("color: palette(midlight);")
+        h.addWidget(line)
+        h.addWidget(self.stack, 1)
+        self.setCentralWidget(central)
+
+        builders = {
+            "welcome": lambda: WelcomePage(self),
+            "appearance": AppearancePage,
+            "dock": DockPage,
+            "windows": WindowsPage,
+            "about": AboutPage,
+        }
+        self.keys = []
+        for key, label, icon in PAGES:
+            item = QListWidgetItem(QIcon.fromTheme(icon, QIcon.fromTheme("preferences-system")), label)
+            self.sidebar.addItem(item)
+            self.stack.addWidget(builders[key]())
+            self.keys.append(key)
+        self.sidebar.currentRowChanged.connect(self.stack.setCurrentIndex)
+        self.sidebar.setCurrentRow(0)
+
+    def show_page(self, key):
+        if key in self.keys:
+            self.sidebar.setCurrentRow(self.keys.index(key))
+
+
+def should_show_welcome():
+    if is_live_session():
+        return True
+    shown = kread("horizon-settingsrc", ["Welcome"], "Shown", "false") == "true"
+    always = kread("horizon-settingsrc", ["Welcome"], "ShowOnStartup", "false") == "true"
+    return always or not shown
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--page", choices=[p[0] for p in PAGES], help="page to open")
+    parser.add_argument("--welcome", action="store_true",
+                        help="autostart mode: show the welcome page on first login only")
+    args, qt_args = parser.parse_known_args()
+
+    if args.welcome:
+        if not should_show_welcome():
+            return 0
+        kwrite("horizon-settingsrc", ["Welcome"], "Shown", "true")
+
+    app = QApplication([sys.argv[0]] + qt_args)
+    app.setApplicationName("horizon-settings")
+    app.setApplicationDisplayName(APP_NAME)
+    app.setDesktopFileName("org.horizon.settings")
+    app.setStyleSheet(STYLE)
+    win = MainWindow()
+    win.show_page(args.page or "welcome")
+    win.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

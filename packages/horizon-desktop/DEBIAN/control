@@ -1,0 +1,14 @@
+Package: horizon-desktop
+Version: @DISTRO_VERSION@
+Architecture: all
+Maintainer: @DISTRO_NAME@ developers <noreply@example.com>
+Section: x11
+Priority: optional
+Depends: plasma-desktop, plasma-workspace, kwin-wayland, python3, python3-pyqt6, qt6-style-kvantum, fonts-inter
+Recommends: appmenu-gtk3-module, qdbus-qt6
+Conflicts: kubuntu-settings-desktop
+Replaces: kubuntu-settings-desktop
+Description: @DISTRO_NAME@ desktop defaults
+ macOS-style KDE Plasma defaults for @DISTRO_NAME@: top bar with global menu,
+ centered floating dock, Launchpad, window animations, WhiteSur theming,
+ wallpapers, os-release branding and the Horizon Settings app.

@@ -1,0 +1,11 @@
+Package: horizon-installer
+Version: @DISTRO_VERSION@
+Architecture: all
+Maintainer: @DISTRO_NAME@ developers <noreply@example.com>
+Section: admin
+Priority: optional
+Depends: calamares, qml6-module-qtquick-controls, sudo
+Conflicts: calamares-settings-kubuntu, calamares-settings-ubuntu-common
+Description: @DISTRO_NAME@ graphical installer (live session only)
+ Calamares configuration, branding and slideshow for installing @DISTRO_NAME@.
+ This package is removed automatically from the installed system.

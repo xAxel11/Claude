@@ -1,0 +1,8 @@
+#!/bin/sh
+# Launch the @DISTRO_NAME@ installer from the live session.
+if [ "$(id -u)" -ne 0 ]; then
+    exec sudo -E "$0" "$@"
+fi
+# Let the installer open links in the live user's browser.
+export BROWSER="sudo -u ${SUDO_USER:-@LIVE_USER@} xdg-open"
+exec calamares -D6 "$@"

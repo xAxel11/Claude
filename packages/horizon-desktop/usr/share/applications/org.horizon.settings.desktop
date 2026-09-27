@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Horizon Settings
+GenericName=Personalize your desktop
+Comment=Light and dark mode, accent colour, dock, layouts and animations
+Exec=horizon-settings
+Icon=horizon-logo
+Categories=Qt;KDE;Settings;DesktopSettings;
+Keywords=theme;dark;light;dock;panel;layout;animation;accent;wallpaper;
+StartupNotify=true

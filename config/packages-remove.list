@@ -1,0 +1,5 @@
+# Packages purged from the image after install (and blocked via APT pinning).
+snapd
+ubuntu-advantage-tools
+ubuntu-pro-client
+kubuntu-settings-desktop

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=@DISTRO_NAME@ Welcome
+Exec=horizon-settings --welcome
+Icon=horizon-logo
+X-KDE-autostart-phase=2
+NoDisplay=true
+OnlyShowIn=KDE;
