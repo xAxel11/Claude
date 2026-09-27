@@ -245,9 +245,10 @@ stage_iso() {
     for deb in "$bl"/shim-signed_*.deb "$bl"/grub-efi-amd64-signed_*.deb; do
         dpkg-deb -x "$deb" "$boot/x"
     done
+    first_existing() { local f; for f in "$@"; do [[ -e $f ]] && { echo "$f"; return; }; done; }
     local shim grub
-    shim=$(ls "$boot"/x/usr/lib/shim/shimx64.efi.signed.latest "$boot"/x/usr/lib/shim/shimx64.efi.signed 2>/dev/null | head -n1)
-    grub=$(ls "$boot"/x/usr/lib/grub/x86_64-efi-signed/gcdx64.efi.signed "$boot"/x/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed 2>/dev/null | head -n1)
+    shim=$(first_existing "$boot"/x/usr/lib/shim/shimx64.efi.signed.latest "$boot"/x/usr/lib/shim/shimx64.efi.signed)
+    grub=$(first_existing "$boot"/x/usr/lib/grub/x86_64-efi-signed/gcdx64.efi.signed "$boot"/x/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed)
     [[ -n $shim && -n $grub ]] || die "Could not find signed shim/grub binaries"
     cp "$shim" "$IMAGE/EFI/boot/bootx64.efi"
     cp "$grub" "$IMAGE/EFI/boot/grubx64.efi"
