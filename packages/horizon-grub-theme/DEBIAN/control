@@ -1,0 +1,10 @@
+Package: horizon-grub-theme
+Version: @DISTRO_VERSION@
+Architecture: all
+Maintainer: @DISTRO_NAME@ developers <noreply@example.com>
+Section: admin
+Priority: optional
+Depends: grub2-common
+Description: @DISTRO_NAME@ graphical boot menu
+ Themed GRUB boot menu (UEFI with Secure Boot and legacy BIOS) matching the
+ @DISTRO_NAME@ look. Toggle it with "horizon boot theme on|off".

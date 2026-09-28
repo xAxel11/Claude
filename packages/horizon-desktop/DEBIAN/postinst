@@ -7,9 +7,10 @@ if [ "$1" = configure ]; then
         printf '[General]\nbackground=/usr/share/wallpapers/Horizon/contents/images/3840x2160.png\ntype=image\n' > "$conf"
     fi
     # Text boot splash: show our name instead of "Ubuntu 26.04".
-    for f in /usr/share/plymouth/themes/ubuntu-text/ubuntu-text.plymouth; do
-        [ -f "$f" ] && sed -i 's/^title=.*/title=@DISTRO_NAME@ @DISTRO_VERSION@/' "$f"
-    done
+    f=/usr/share/plymouth/themes/ubuntu-text/ubuntu-text.plymouth
+    if [ -f "$f" ]; then
+        sed -i 's/^title=.*/title=@DISTRO_NAME@ @DISTRO_VERSION@/' "$f"
+    fi
     command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -f /usr/share/icons/hicolor || true
     command -v update-desktop-database >/dev/null && update-desktop-database -q || true
 fi

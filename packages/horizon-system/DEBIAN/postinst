@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ]; then
+    if command -v deb-systemd-helper >/dev/null; then
+        deb-systemd-helper enable horizon-firstboot.service >/dev/null || true
+    fi
+    # Apply sysctl tuning now on a running system (no-op in the image build).
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+        sysctl -q --system || true
+    fi
+fi

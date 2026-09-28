@@ -1,0 +1,18 @@
+#!/bin/sh
+# One-time setup on the first boot of an installed (or live) system.
+set -u
+STATE=/var/lib/horizon/firstboot.done
+mkdir -p /var/lib/horizon
+
+if command -v ufw >/dev/null; then
+    ufw --force enable
+    # KDE Connect (phone integration) needs these ports on the local network.
+    ufw allow 1714:1764/udp
+    ufw allow 1714:1764/tcp
+fi
+
+# Flathub needs the network; if we're offline, try again next boot.
+if command -v flatpak >/dev/null; then
+    flatpak remote-add --system --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo || exit 0
+fi
+touch "$STATE"

@@ -89,16 +89,18 @@ log "Installing live-session packages"
 mapfile -t live < <(read_list "$W/config/packages-live.list")
 "${APT[@]}" install "${live[@]}"
 
+# --- Horizon packages ----------------------------------------------------------------------
+# The desktop, apps and tools come from our own .deb packages (horizon-apps pulls in
+# KDE Plasma and everything else as dependencies), so they update like any package.
+log "Installing Horizon packages (desktop, apps, tools, boot theme)"
+"${APT[@]}" install "$W"/debs/*.deb
+
 # --- macOS-style themes ----------------------------------------------------------------
 log "Installing WhiteSur themes (KDE, icons, cursors)"
 (cd "$W/themes/WhiteSur-kde" && ./install.sh) || warn "WhiteSur-kde installer reported an error"
 (cd "$W/themes/WhiteSur-icon-theme" && ./install.sh -a -b) \
     || (cd "$W/themes/WhiteSur-icon-theme" && ./install.sh) || warn "WhiteSur icon installer reported an error"
 (cd "$W/themes/WhiteSur-cursors" && ./install.sh) || warn "WhiteSur cursor installer reported an error"
-
-# --- Horizon packages ----------------------------------------------------------------------
-log "Installing Horizon packages"
-"${APT[@]}" install "$W"/debs/*.deb
 
 log "Removing unwanted packages"
 for pkg in $(read_list "$W/config/packages-remove.list"); do

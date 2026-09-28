@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ]; then
+    mkdir -p /boot/grub/themes
+    rm -rf /boot/grub/themes/horizon
+    cp -r /usr/share/grub/themes/horizon /boot/grub/themes/horizon
+    if [ -e /boot/grub/grub.cfg ] && command -v update-grub >/dev/null; then
+        update-grub || true
+    fi
+fi

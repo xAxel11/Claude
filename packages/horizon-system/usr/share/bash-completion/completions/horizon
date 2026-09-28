@@ -1,0 +1,35 @@
+# bash completion for the horizon command
+# shellcheck disable=SC2207  # COMPREPLY=($(compgen …)) is the standard completion idiom
+_horizon() {
+    local cur prev words cword
+    _init_completion 2>/dev/null || { cur="${COMP_WORDS[COMP_CWORD]}"; prev="${COMP_WORDS[COMP_CWORD-1]}"; cword=$COMP_CWORD; words=("${COMP_WORDS[@]}"); }
+    local cmds="update install remove search list clean info doctor drivers firewall snapshot uefi boot theme accent layout dock version help"
+    if [[ $cword -eq 1 || ( $cword -eq 2 && ${words[1]} == -y ) ]]; then
+        COMPREPLY=($(compgen -W "$cmds -y" -- "$cur")); return
+    fi
+    local sub="${words[1]}"; [[ $sub == -y ]] && sub="${words[2]}"
+    case "$sub" in
+        install)  if [[ $cur == */* || $cur == .* ]]; then _filedir deb 2>/dev/null || COMPREPLY=($(compgen -f -- "$cur"))
+                  else COMPREPLY=($(apt-cache --no-generate pkgnames "$cur" 2>/dev/null | head -n 200)); fi ;;
+        remove)   COMPREPLY=($(dpkg-query -W -f '${Package}\n' 2>/dev/null | grep "^$cur" | head -n 200)) ;;
+        drivers)  COMPREPLY=($(compgen -W "list install" -- "$cur")) ;;
+        firewall) COMPREPLY=($(compgen -W "status on off allow deny kdeconnect" -- "$cur")) ;;
+        snapshot) COMPREPLY=($(compgen -W "list create restore delete" -- "$cur")) ;;
+        uefi)     COMPREPLY=($(compgen -W "status entries firmware next order firmware-update" -- "$cur")) ;;
+        boot)     case "$prev" in menu|theme) COMPREPLY=($(compgen -W "on off" -- "$cur"));;
+                  *) COMPREPLY=($(compgen -W "status menu timeout theme set" -- "$cur"));; esac ;;
+        theme)    COMPREPLY=($(compgen -W "light dark" -- "$cur")) ;;
+        accent)   COMPREPLY=($(compgen -W "blue purple pink red orange yellow green graphite" -- "$cur")) ;;
+        layout)   COMPREPLY=($(compgen -W "macos focus classic" -- "$cur")) ;;
+        dock)     case "$prev" in
+                      position) COMPREPLY=($(compgen -W "bottom left right" -- "$cur"));;
+                      align) COMPREPLY=($(compgen -W "left center right" -- "$cur"));;
+                      hide) COMPREPLY=($(compgen -W "always dodge auto" -- "$cur"));;
+                      float) COMPREPLY=($(compgen -W "on off" -- "$cur"));;
+                      dock) COMPREPLY=($(compgen -W "position size align hide float pin unpin" -- "$cur"));;
+                  esac ;;
+        info)     COMPREPLY=($(compgen -W "--small --no-logo --json" -- "$cur")) ;;
+        list)     COMPREPLY=($(compgen -W "--all" -- "$cur")) ;;
+    esac
+}
+complete -F _horizon horizon

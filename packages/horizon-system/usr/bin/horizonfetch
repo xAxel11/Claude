@@ -1,0 +1,374 @@
+#!/usr/bin/env python3
+"""horizonfetch — system info with the @DISTRO_NAME@ logo (a custom neofetch).
+
+    horizonfetch            logo + info
+    horizonfetch --small    compact logo
+    horizonfetch --no-logo  info only
+    horizonfetch --json     machine-readable output
+"""
+
+import argparse
+import glob
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+DISTRO_NAME = "@DISTRO_NAME@"
+if DISTRO_NAME.startswith("@"):
+    DISTRO_NAME = "Horizon OS"
+
+# The logo: a sun rising over the horizon, drawn with a sky gradient.
+W = 36
+LOGO = [r.center(W) for r in [
+    "",
+    "▄▄████▄▄",
+    "▄██████████████▄",
+    "▄████████████████████▄",
+    "████████████████████████",
+    "██████████████████████████",
+    "████████████████████████████",
+    "▀" * 34,
+    "",
+    "▀" * 30,
+    "▀" * 20,
+    "▀" * 10,
+    "",
+]]
+SMALL_LOGO = [r.center(17) for r in [
+    "▄▄███▄▄",
+    "▄█████████▄",
+    "█████████████",
+    "▀" * 15,
+    "▀" * 11,
+    "▀" * 5,
+]]
+SUN_TOP, SUN_BOTTOM = (255, 244, 200), (255, 176, 80)   # warm sun
+LINES = [(122, 170, 255), (178, 120, 255), (244, 88, 155)]  # blue → purple → pink
+ACCENT = (142, 92, 247)
+
+
+def rgb(c, text, color=True):
+    return f"\033[38;2;{c[0]};{c[1]};{c[2]}m{text}\033[0m" if color else text
+
+
+def mix(a, b, t):
+    return tuple(round(x + (y - x) * t) for x, y in zip(a, b))
+
+
+def paint_logo(rows, color):
+    """Sun rows get a vertical warm gradient; horizon lines go blue→pink."""
+    out, sun_rows = [], [i for i, r in enumerate(rows) if "█" in r]
+    line_rows = [i for i, r in enumerate(rows) if "▀" in r and "█" not in r]
+    for i, row in enumerate(rows):
+        if i in sun_rows:
+            t = sun_rows.index(i) / max(1, len(sun_rows) - 1)
+            out.append(rgb(mix(SUN_TOP, SUN_BOTTOM, t), row, color))
+        elif i in line_rows:
+            t = line_rows.index(i) / max(1, len(line_rows) - 1)
+            c = mix(LINES[0], LINES[1], t * 2) if t <= 0.5 else mix(LINES[1], LINES[2], (t - 0.5) * 2)
+            out.append(rgb(c, row, color))
+        else:
+            out.append(row)
+    return out
+
+
+# ----------------------------------------------------------------- probes
+
+def read(path, default=""):
+    try:
+        return Path(path).read_text(errors="ignore").strip()
+    except OSError:
+        return default
+
+
+def cmd(*args, timeout=2):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=timeout).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def os_name():
+    info = {}
+    for line in read("/etc/os-release").splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            info[k] = v.strip('"')
+    name = info.get("PRETTY_NAME", DISTRO_NAME)
+    base = info.get("UBUNTU_CODENAME")
+    if base and info.get("ID") != "ubuntu":
+        return f"{name} (Ubuntu {base.capitalize()})"
+    return name
+
+
+def host():
+    name = read("/sys/class/dmi/id/product_name")
+    version = read("/sys/class/dmi/id/product_version")
+    vendor = read("/sys/class/dmi/id/sys_vendor")
+    junk = {"", "To be filled by O.E.M.", "System Product Name", "Default string", "None"}
+    parts = [p for p in (vendor, name, version) if p not in junk]
+    return " ".join(dict.fromkeys(parts)) or platform.node()
+
+
+def uptime():
+    try:
+        secs = int(float(read("/proc/uptime").split()[0]))
+    except (IndexError, ValueError):
+        return ""
+    d, rem = divmod(secs, 86400)
+    h, rem = divmod(rem, 3600)
+    m = rem // 60
+    parts = [f"{d} day{'s' * (d != 1)}" if d else "", f"{h} hour{'s' * (h != 1)}" if h else "", f"{m} min"]
+    return ", ".join(p for p in parts if p)
+
+
+def packages():
+    parts = []
+    status = read("/var/lib/dpkg/status")
+    if status:
+        n = len(re.findall(r"^Status: install ok installed", status, re.M))
+        parts.append(f"{n} (deb)")
+    if shutil.which("flatpak"):
+        apps = [l for l in cmd("flatpak", "list", "--app", "--columns=application").splitlines() if l]
+        parts.append(f"{len(apps)} (flatpak)")
+    return ", ".join(parts)
+
+
+def shell():
+    sh = os.path.basename(os.environ.get("SHELL", ""))
+    ver = ""
+    if sh == "bash":
+        ver = cmd("bash", "-c", "echo ${BASH_VERSION%%(*}")
+    elif sh == "zsh":
+        ver = cmd("zsh", "-c", "echo $ZSH_VERSION")
+    return f"{sh} {ver}".strip()
+
+
+def desktop():
+    de = os.environ.get("XDG_CURRENT_DESKTOP", "")
+    session = os.environ.get("XDG_SESSION_TYPE", "")
+    ver = ""
+    if "KDE" in de or shutil.which("plasmashell"):
+        out = cmd("plasmashell", "--version")
+        ver = out.split()[-1] if out else ""
+        de = "KDE Plasma"
+    return " ".join(p for p in (de, ver, f"({session.capitalize()})" if session else "") if p)
+
+
+def kde_value(file, group, key):
+    for base in (Path.home() / ".config", Path("/etc/xdg")):
+        section = None
+        for line in read(base / file).splitlines():
+            if line.startswith("["):
+                section = line.strip()
+            elif section == f"[{group}]" and line.startswith(f"{key}="):
+                return line.split("=", 1)[1]
+    return ""
+
+
+def theme():
+    scheme = kde_value("kdeglobals", "General", "ColorScheme")
+    icons = kde_value("kdeglobals", "Icons", "Theme")
+    return scheme, icons
+
+
+def terminal():
+    try:
+        pid = os.getppid()
+        for _ in range(6):
+            name = read(f"/proc/{pid}/comm")
+            if name and name not in ("bash", "zsh", "fish", "sh", "sudo", "python3", "horizon", "su"):
+                return name
+            pid = int(read(f"/proc/{pid}/stat").split(")")[1].split()[1])
+    except (ValueError, IndexError):
+        pass
+    return os.environ.get("TERM_PROGRAM", os.environ.get("TERM", ""))
+
+
+def cpu():
+    model = ""
+    for line in read("/proc/cpuinfo").splitlines():
+        if line.startswith("model name"):
+            model = line.split(":", 1)[1].strip()
+            break
+    model = re.sub(r"\((R|TM)\)|CPU|Processor|\d+-Core|with Radeon.*", "", model)
+    model = re.sub(r"\s+", " ", model).strip(" @")
+    return f"{model} ({os.cpu_count()})" if model else f"{platform.machine()} ({os.cpu_count()})"
+
+
+def gpus():
+    out = cmd("lspci", "-mm")
+    result = []
+    for line in out.splitlines():
+        if re.search(r'"(VGA compatible controller|3D controller|Display controller)"', line):
+            fields = re.findall(r'"([^"]*)"', line)
+            if len(fields) >= 3:
+                vendor = fields[1].replace("Corporation", "").replace("Advanced Micro Devices, Inc.", "AMD").strip()
+                vendor = vendor.replace("[AMD/ATI]", "").strip()
+                result.append(f"{vendor} {fields[2]}".replace("  ", " "))
+    return result
+
+
+def memory():
+    info = {}
+    for line in read("/proc/meminfo").splitlines():
+        k, _, v = line.partition(":")
+        info[k] = int(v.split()[0]) if v.split() else 0
+    total = info.get("MemTotal", 0)
+    used = total - info.get("MemAvailable", 0)
+    return used, total
+
+
+def disk():
+    st = os.statvfs("/")
+    total = st.f_blocks * st.f_frsize
+    used = total - st.f_bavail * st.f_frsize
+    fs = ""
+    for line in read("/proc/mounts").splitlines():
+        parts = line.split()
+        if len(parts) > 2 and parts[1] == "/":
+            fs = parts[2]
+    return used, total, fs
+
+
+def battery():
+    for bat in sorted(glob.glob("/sys/class/power_supply/BAT*")):
+        cap = read(f"{bat}/capacity")
+        status = read(f"{bat}/status")
+        if cap:
+            return f"{cap}% ({status})" if status else f"{cap}%"
+    return ""
+
+
+def boot():
+    if not os.path.isdir("/sys/firmware/efi"):
+        return "Legacy BIOS"
+    sb = ""
+    for f in glob.glob("/sys/firmware/efi/efivars/SecureBoot-*"):
+        try:
+            sb = "on" if Path(f).read_bytes()[-1] == 1 else "off"
+        except OSError:
+            pass
+    return f"UEFI, Secure Boot {sb}" if sb else "UEFI"
+
+
+def resolution():
+    sizes = []
+    for mode in glob.glob("/sys/class/drm/*/modes"):
+        status = read(mode.replace("modes", "status"))
+        first = read(mode).splitlines()
+        if status == "connected" and first:
+            sizes.append(first[0])
+    return ", ".join(sizes)
+
+
+def human(n):
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}" if unit not in ("B", "KiB") else f"{n:.0f} {unit}"
+        n /= 1024
+    return f"{n:.1f} PiB"
+
+
+def bar(frac, width=12, color=True):
+    filled = round(frac * width)
+    c = (48, 209, 88) if frac < 0.6 else (255, 159, 10) if frac < 0.85 else (255, 69, 58)
+    return rgb(c, "━" * filled, color) + rgb((90, 90, 110), "━" * (width - filled), color)
+
+
+# ------------------------------------------------------------------- main
+
+def collect():
+    scheme, icons = theme()
+    mu, mt = memory()
+    du, dt, fs = disk()
+    data = {
+        "OS": os_name(),
+        "Host": host(),
+        "Kernel": platform.release(),
+        "Uptime": uptime(),
+        "Packages": packages(),
+        "Shell": shell(),
+        "Desktop": desktop(),
+        "Theme": scheme,
+        "Icons": icons,
+        "Terminal": terminal(),
+        "Display": resolution(),
+        "CPU": cpu(),
+        "GPU": gpus(),
+        "Memory": (mu * 1024, mt * 1024),
+        "Disk (/)": (du, dt, fs),
+        "Battery": battery(),
+        "Boot": boot(),
+        "Locale": os.environ.get("LANG", ""),
+    }
+    return data
+
+
+def main():
+    ap = argparse.ArgumentParser(description="System information with the " + DISTRO_NAME + " logo")
+    ap.add_argument("--small", action="store_true", help="compact logo")
+    ap.add_argument("--no-logo", action="store_true", help="hide the logo")
+    ap.add_argument("--no-color", action="store_true", help="plain text")
+    ap.add_argument("--json", action="store_true", help="print JSON")
+    args = ap.parse_args()
+
+    data = collect()
+    if args.json:
+        out = dict(data)
+        out["Memory"] = {"used": data["Memory"][0], "total": data["Memory"][1]}
+        du, dt, fs = data["Disk (/)"]
+        out["Disk (/)"] = {"used": du, "total": dt, "filesystem": fs}
+        print(json.dumps(out, indent=2))
+        return 0
+
+    color = not args.no_color and sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+    key = lambda k: rgb(ACCENT, f"{k:<9}", color)  # noqa: E731
+    user = f"{os.environ.get('USER', 'user')}@{platform.node()}"
+    info = [rgb((255, 255, 255), "\033[1m" + user, color) if color else user,
+            rgb((110, 110, 140), "─" * len(user), color)]
+    for k, v in data.items():
+        if k == "GPU":
+            for i, g in enumerate(v or []):
+                info.append(f"{key('GPU' if len(v) == 1 else f'GPU {i + 1}')} {g}")
+            continue
+        if k == "Memory":
+            used, total = v
+            if total:
+                info.append(f"{key(k)} {human(used)} / {human(total)} {bar(used / total, color=color)}")
+            continue
+        if k == "Disk (/)":
+            used, total, fs = v
+            if total:
+                info.append(f"{key('Disk')} {human(used)} / {human(total)} {bar(used / total, color=color)}"
+                            + (f" {fs}" if fs else ""))
+            continue
+        if v:
+            info.append(f"{key(k)} {v}")
+    info.append("")
+    swatches = [(255, 95, 87), (254, 188, 46), (40, 200, 64), (10, 132, 255),
+                (191, 90, 242), (255, 55, 95), (100, 210, 255), (142, 142, 147)]
+    info.append("".join(rgb(c, "███", color) for c in swatches) if color else "")
+
+    if args.no_logo:
+        print("\n".join(info))
+        return 0
+    raw = SMALL_LOGO if args.small else LOGO
+    width = max(len(r) for r in raw)
+    logo = paint_logo([r.ljust(width) for r in raw], color)
+    rows = max(len(logo), len(info))
+    for i in range(rows):
+        left = logo[i] if i < len(logo) else " " * width
+        right = info[i] if i < len(info) else ""
+        print(f"{left}  {right}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

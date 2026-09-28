@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Package Installer
+GenericName=Install .deb packages
+Comment=Install downloaded .deb apps with their dependencies
+Exec=horizon-deb-installer %F
+Icon=system-software-install
+MimeType=application/vnd.debian.binary-package;application/x-deb;
+Categories=Qt;KDE;System;PackageManager;
+NoDisplay=true
+StartupNotify=true

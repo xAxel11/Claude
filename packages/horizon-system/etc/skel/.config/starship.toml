@@ -1,0 +1,33 @@
+# Starship prompt — macOS-like and minimal, no special fonts needed.
+add_newline = true
+format = "$directory$git_branch$git_status$python$nodejs$rust$golang$cmd_duration$line_break$character"
+
+[character]
+success_symbol = "[❯](bold purple)"
+error_symbol = "[❯](bold red)"
+
+[directory]
+style = "bold blue"
+truncation_length = 3
+truncate_to_repo = true
+
+[git_branch]
+symbol = "⎇ "
+style = "bold #bf5af2"
+
+[git_status]
+style = "yellow"
+
+[cmd_duration]
+min_time = 2000
+format = "[⏱ $duration]($style) "
+style = "dimmed white"
+
+[python]
+symbol = "py "
+[nodejs]
+symbol = "node "
+[rust]
+symbol = "rs "
+[golang]
+symbol = "go "

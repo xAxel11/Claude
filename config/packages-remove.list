@@ -1,5 +1,11 @@
-# Packages purged from the image after install (and blocked via APT pinning).
+# Packages purged from the image (snapd is also blocked via APT pinning).
 snapd
 ubuntu-advantage-tools
 ubuntu-pro-client
 kubuntu-settings-desktop
+# No telemetry or crash uploads
+whoopsie
+apport
+apport-kde
+ubuntu-report
+popularity-contest

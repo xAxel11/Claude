@@ -70,10 +70,10 @@ in_chroot() { chroot "$CHROOT" /usr/bin/env -i \
 
 stage_deps() {
     log "Installing host dependencies"
-    command -v apt-get >/dev/null || die "Automatic dependency install needs a Debian/Ubuntu host. Install manually: debootstrap squashfs-tools xorriso mtools dosfstools git librsvg2-bin dpkg-dev"
+    command -v apt-get >/dev/null || die "Automatic dependency install needs a Debian/Ubuntu host. Install manually: debootstrap squashfs-tools xorriso mtools dosfstools git librsvg2-bin imagemagick grub-common fontconfig fonts-inter dpkg-dev"
     apt-get update
     apt-get install -y debootstrap squashfs-tools xorriso mtools dosfstools \
-        git librsvg2-bin dpkg-dev ca-certificates rsync
+        git librsvg2-bin imagemagick grub-common fontconfig fonts-inter dpkg-dev ca-certificates rsync
     # Older hosts don't know newer Ubuntu codenames yet; they all use the same script.
     if [[ ! -e /usr/share/debootstrap/scripts/$UBUNTU_SUITE ]]; then
         ln -s gutsy "/usr/share/debootstrap/scripts/$UBUNTU_SUITE"
@@ -146,13 +146,16 @@ build_deb() { # <package dir name>
     rm -rf "$tree"
     mkdir -p "$tree"
     cp -a "$src/." "$tree/"
-    if [[ $name == horizon-desktop ]]; then
-        render_assets "$tree"
-    else
-        local brand="$tree/etc/calamares/branding/horizon"
-        rsvg-convert -w 256 -h 256 "$ROOT_DIR/assets/logo.svg" -o "$brand/logo.png"
-        rsvg-convert -w 900 -h 400 "$ROOT_DIR/assets/wallpaper-light.svg" -o "$brand/welcome.png"
-    fi
+    case "$name" in
+        horizon-desktop)
+            render_assets "$tree" ;;
+        horizon-installer)
+            local brand="$tree/etc/calamares/branding/horizon"
+            rsvg-convert -w 256 -h 256 "$ROOT_DIR/assets/logo.svg" -o "$brand/logo.png"
+            rsvg-convert -w 900 -h 400 "$ROOT_DIR/assets/wallpaper-light.svg" -o "$brand/welcome.png" ;;
+        horizon-grub-theme)
+            "$ROOT_DIR/scripts/make-grub-theme.sh" "$tree/usr/share/grub/themes/horizon" "$DISTRO_NAME" "$ROOT_DIR/assets" ;;
+    esac
 
     # Substitute branding placeholders in every text file.
     grep -rIlE '@(DISTRO|UBUNTU|LIVE)_' "$tree" | while read -r f; do
@@ -179,9 +182,16 @@ build_deb() { # <package dir name>
 }
 
 stage_debs() {
-    command -v rsvg-convert >/dev/null || die "rsvg-convert missing — run '$0 deps' first"
-    build_deb horizon-desktop
-    build_deb horizon-installer
+    local tool
+    for tool in rsvg-convert convert grub-mkfont fc-match dpkg-deb; do
+        command -v "$tool" >/dev/null || die "$tool missing — run '$0 deps' first"
+    done
+    rm -f "$DEBS"/*.deb
+    # Every folder in packages/ with a DEBIAN/control becomes a .deb.
+    local dir
+    for dir in "$ROOT_DIR"/packages/*/; do
+        [[ -f $dir/DEBIAN/control ]] && build_deb "$(basename "$dir")"
+    done
 }
 
 stage_chroot() {
@@ -213,11 +223,21 @@ stage_iso() {
     [[ -e "$CHROOT/boot/vmlinuz" ]] || die "No kernel in the image — run '$0 chroot' first"
     log "Assembling ISO tree"
     rm -rf "$IMAGE"
-    mkdir -p "$IMAGE"/{casper,boot/grub/fonts,EFI/boot,.disk,isolinux}
+    mkdir -p "$IMAGE"/{casper,boot/grub/fonts,boot/grub/themes,EFI/boot,.disk,isolinux}
 
     cp -L "$CHROOT/boot/vmlinuz"    "$IMAGE/casper/vmlinuz"
     cp -L "$CHROOT/boot/initrd.img" "$IMAGE/casper/initrd"
     cp "$CHROOT/usr/share/grub/unicode.pf2" "$IMAGE/boot/grub/fonts/" 2>/dev/null || true
+    if [[ -d $CHROOT/usr/share/grub/themes/horizon ]]; then
+        cp -r "$CHROOT/usr/share/grub/themes/horizon" "$IMAGE/boot/grub/themes/"
+    else
+        warn "GRUB theme not installed in the image — the boot menu will be plain text"
+    fi
+    # memtest86+ ships one image that boots on both BIOS and UEFI.
+    if [[ -e $CHROOT/boot/mt86+x64 ]]; then
+        mkdir -p "$IMAGE/boot/memtest"
+        cp "$CHROOT/boot/mt86+x64" "$IMAGE/boot/memtest/mt86+x64"
+    fi
 
     sed -e "s|@DISTRO_NAME@|$DISTRO_NAME|g" -e "s|@DISTRO_ID@|$DISTRO_ID|g" "$ROOT_DIR/iso/grub.cfg" > "$IMAGE/boot/grub/grub.cfg"
     cp "$IMAGE/boot/grub/grub.cfg" "$IMAGE/EFI/boot/grub.cfg"
@@ -265,8 +285,9 @@ stage_iso() {
     mkdir -p "$CHROOT/tmp/isogrub"
     cp "$IMAGE/boot/grub/grub.cfg" "$CHROOT/tmp/isogrub/grub.cfg"
     chroot "$CHROOT" grub-mkstandalone --format=i386-pc --output=/tmp/isogrub/core.img \
-        --install-modules="linux16 linux normal iso9660 biosdisk memdisk search tar ls all_video gfxterm font" \
-        --modules="linux16 linux normal iso9660 biosdisk search" \
+        --install-modules="linux16 linux normal iso9660 biosdisk memdisk search tar ls" \
+        --modules="linux16 linux normal iso9660 biosdisk search test echo halt reboot sleep true \
+                   all_video gfxterm gfxmenu gfxterm_background font jpeg png" \
         --locales="" --fonts="" "boot/grub/grub.cfg=/tmp/isogrub/grub.cfg"
     cat "$CHROOT/usr/lib/grub/i386-pc/cdboot.img" "$CHROOT/tmp/isogrub/core.img" > "$IMAGE/isolinux/bios.img"
     rm -rf "$CHROOT/tmp/isogrub"

@@ -1,16 +1,2 @@
-# Nice-to-have packages — installed if available, skipped (with a warning) if not.
-plymouth-theme-breeze
-plasma-browser-integration
-kde-config-flatpak
-kdeconnect
-partitionmanager
-elisa
-haruna
-libreoffice-writer
-libreoffice-calc
-libreoffice-impress
-libreoffice-kf6
-vlc
-fwupd
-power-profiles-daemon
-7zip
+# Your own extra packages — installed if available, skipped with a warning if not.
+# (The standard app selection lives in packages/horizon-apps/DEBIAN/control.)

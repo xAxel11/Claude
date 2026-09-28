@@ -1,7 +1,6 @@
-# Required packages — the build fails if any of these is missing.
-# One package per line; comments start with #.
-
-# Base system + live boot
+# Base system — everything needed to boot, run live and install.
+# The desktop and apps come from the horizon-apps metapackage
+# (packages/horizon-apps/DEBIAN/control), so they update like any .deb.
 ubuntu-standard
 linux-generic
 linux-firmware
@@ -21,52 +20,3 @@ grub-gfxpayload-lists
 mokutil
 sbsigntool
 ucf
-
-# Desktop: KDE Plasma 6 (Wayland)
-kde-plasma-desktop
-plasma-desktop
-plasma-workspace
-kwin-wayland
-sddm
-sddm-theme-breeze
-kde-config-sddm
-systemsettings
-xdg-desktop-portal-kde
-plasma-nm
-plasma-pa
-bluedevil
-powerdevil
-kscreen
-kde-config-gtk-style
-breeze-gtk-theme
-appmenu-gtk3-module
-qt6-style-kvantum
-qdbus-qt6
-pipewire-audio
-wireplumber
-
-# Core apps
-dolphin
-konsole
-kate
-ark
-gwenview
-okular
-kcalc
-kde-spectacle
-plasma-systemmonitor
-kinfocenter
-plasma-discover
-plasma-discover-backend-flatpak
-flatpak
-kio-extras
-ffmpegthumbs
-kdegraphics-thumbnailers
-
-# Fonts (Inter is the closest free match to San Francisco)
-fonts-inter
-fonts-noto-color-emoji
-fonts-noto-core
-
-# Horizon Settings app
-python3-pyqt6

@@ -1,0 +1,14 @@
+#!/bin/sh
+# Privileged helper for horizon-deb-installer (run through pkexec).
+# Installs local .deb files with apt so dependencies are fetched automatically.
+set -e
+[ "$#" -gt 0 ] || { echo "usage: install-deb FILE.deb…" >&2; exit 2; }
+for f in "$@"; do
+    case "$f" in
+        /*.deb) [ -f "$f" ] || { echo "not found: $f" >&2; exit 2; } ;;
+        *) echo "refusing: $f (absolute path to a .deb required)" >&2; exit 2 ;;
+    esac
+done
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -o APT::Update::Error-Mode=any 2>/dev/null || apt-get update || true
+exec apt-get install -y -o Dpkg::Progress-Fancy=0 "$@"

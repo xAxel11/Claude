@@ -1,0 +1,7 @@
+[Default Applications]
+application/vnd.debian.binary-package=org.horizon.debinstaller.desktop
+application/x-deb=org.horizon.debinstaller.desktop
+
+[Added Associations]
+application/vnd.debian.binary-package=org.horizon.debinstaller.desktop;org.kde.discover.desktop;
+application/x-deb=org.horizon.debinstaller.desktop;org.kde.discover.desktop;

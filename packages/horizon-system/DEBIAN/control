@@ -1,0 +1,13 @@
+Package: horizon-system
+Version: @DISTRO_VERSION@
+Architecture: all
+Maintainer: @DISTRO_NAME@ developers <noreply@example.com>
+Section: admin
+Priority: optional
+Depends: bash, python3, ufw, systemd-zram-generator, efibootmgr, mokutil, pciutils
+Recommends: fwupd, ubuntu-drivers-common, timeshift, flatpak, unattended-upgrades, bash-completion
+Description: @DISTRO_NAME@ system tools and daily-driver tuning
+ The "horizon" command (updates, installs, cleanup, drivers, firewall,
+ snapshots, UEFI and boot settings, health checks), the horizonfetch system
+ info tool, zram swap, a firewall enabled by default, automatic security
+ updates and sensible journald/sysctl defaults.

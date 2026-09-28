@@ -1,0 +1,37 @@
+Package: horizon-apps
+Version: @DISTRO_VERSION@
+Architecture: all
+Maintainer: @DISTRO_NAME@ developers <noreply@example.com>
+Section: metapackages
+Priority: optional
+Depends: horizon-desktop, horizon-system,
+ kde-plasma-desktop, plasma-desktop, plasma-workspace, kwin-wayland,
+ sddm, sddm-theme-breeze, kde-config-sddm, systemsettings,
+ xdg-desktop-portal-kde, xdg-desktop-portal-gtk,
+ plasma-nm, plasma-pa, bluedevil, powerdevil, kscreen,
+ kde-config-gtk-style, breeze-gtk-theme, appmenu-gtk3-module,
+ qt6-style-kvantum, qdbus-qt6, pipewire-audio, wireplumber,
+ dolphin, konsole, kate, ark, gwenview, okular, kcalc, kde-spectacle,
+ plasma-systemmonitor, kinfocenter,
+ plasma-discover, plasma-discover-backend-flatpak, flatpak,
+ kio-extras, ffmpegthumbs, kdegraphics-thumbnailers,
+ fonts-inter, fonts-noto-color-emoji, fonts-noto-core
+Recommends: libreoffice-writer, libreoffice-calc, libreoffice-impress, libreoffice-kf6,
+ vlc, haruna, elisa, kdeconnect, skanlite, filelight, kfind, sweeper,
+ kcharselect, kwalletmanager, partitionmanager, gparted, timeshift,
+ gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav,
+ libavcodec-extra, ffmpeg,
+ cups, print-manager, system-config-printer, hplip,
+ ubuntu-drivers-common, fwupd, plasma-discover-backend-fwupd, thermald,
+ power-profiles-daemon, plasma-disks, memtest86+,
+ plasma-firewall, unattended-upgrades, software-properties-qt,
+ kio-admin, kio-gdrive, kdenetwork-filesharing, ntfs-3g, exfatprogs,
+ dosfstools, mtools, unzip, zip, 7zip,
+ bash-completion, command-not-found, fastfetch, btop, htop, git, curl, wget,
+ starship, eza, bat, fzf,
+ fonts-liberation, fonts-noto-cjk, plymouth-theme-breeze, kde-config-plymouth,
+ plasma-browser-integration, kde-config-flatpak, ksystemlog
+Description: @DISTRO_NAME@ applications and daily-driver tools
+ Metapackage that pulls in the complete @DISTRO_NAME@ desktop: KDE Plasma,
+ the core apps, media codecs, printing, backups, firmware updates, drivers
+ and terminal tools. Removing a recommended app is safe.

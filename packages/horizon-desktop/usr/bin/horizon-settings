@@ -15,6 +15,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -23,10 +24,10 @@ from pathlib import Path
 from PyQt6.QtCore import QSize, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame,
-    QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QMainWindow, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSlider,
-    QStackedWidget, QToolButton, QVBoxLayout, QWidget,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSlider,
+    QSpinBox, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 try:
@@ -267,6 +268,74 @@ def os_release():
 
 
 # --------------------------------------------------------------------------
+# Actions shared by the GUI and the command line (horizon-settings --set …)
+# --------------------------------------------------------------------------
+
+def apply_accent(color):
+    run("plasma-apply-colorscheme", "--accent-color", color)
+    kwrite("horizon-settingsrc", ["Appearance"], "Accent", color)
+
+
+def apply_icons(name):
+    tool = libexec("plasma-changeicons")
+    if tool:
+        run(tool, name)
+    else:
+        kwrite("kdeglobals", ["Icons"], "Theme", name)
+
+
+def apply_mode(mode):
+    """Switch every theme piece to its light or dark variant; returns the icon theme used."""
+    v = THEME_VARIANTS[mode]
+    scheme = first_installed("colorscheme", v["colorscheme"])
+    if scheme:
+        run("plasma-apply-colorscheme", scheme)
+    theme = first_installed("desktoptheme", v["desktoptheme"])
+    if theme:
+        run("plasma-apply-desktoptheme", theme)
+    deco = first_installed("decoration", v["decoration"])
+    if deco:
+        kwrite("kwinrc", ["org.kde.kdecoration2"], "library", "org.kde.kwin.aurorae")
+        kwrite("kwinrc", ["org.kde.kdecoration2"], "theme", f"__aurorae__svg__{deco}")
+        kwin_reconfigure()
+    kv = first_installed("kvantum", v["kvantum"])
+    if kv:
+        kwrite("Kvantum/kvantum.kvconfig", ["General"], "theme", kv)
+    icons = first_installed("icons", v["icons"])
+    if icons:
+        apply_icons(icons)
+    accent = kread("horizon-settingsrc", ["Appearance"], "Accent")
+    if accent:
+        run("plasma-apply-colorscheme", "--accent-color", accent)
+    kwrite("horizon-settingsrc", ["Appearance"], "Mode", mode)
+    return icons
+
+
+def set_title_buttons(side):
+    left, right = ("XIA", "") if side == "left" else ("M", "IAX")
+    kwrite("kwinrc", ["org.kde.kdecoration2"], "ButtonsOnLeft", left)
+    kwrite("kwinrc", ["org.kde.kdecoration2"], "ButtonsOnRight", right)
+    kwin_reconfigure()
+
+
+def set_animation_speed(factor):
+    kwrite("kdeglobals", ["KDE"], "AnimationDurationFactor", factor)
+    kwin_reconfigure()
+
+
+def set_exclusive_effect(options, chosen):
+    for _, eff in options:
+        if eff:
+            kwin_effect(eff, eff == chosen)
+    kwin_reconfigure()
+
+
+def toggle_effect(name, on):
+    kwin_effect(name, on)
+    kwin_reconfigure()
+
+
+# --------------------------------------------------------------------------
 # Small UI building blocks
 # --------------------------------------------------------------------------
 
@@ -302,7 +371,9 @@ class Card(QFrame):
         line = QHBoxLayout()
         text = QVBoxLayout()
         text.setSpacing(2)
-        text.addWidget(QLabel(label))
+        title = QLabel(label)
+        title.setWordWrap(True)
+        text.addWidget(title)
         if hint:
             text.addWidget(muted(hint))
         line.addLayout(text, 1)
@@ -316,6 +387,7 @@ class Page(QScrollArea):
         super().__init__()
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         inner = QWidget()
         self.box = QVBoxLayout(inner)
         self.box.setContentsMargins(28, 24, 28, 24)
@@ -512,6 +584,27 @@ class WelcomePage(Page):
             line.addWidget(QLabel(what), 1)
             tips.box.addLayout(line)
 
+        cmds = self.add(Card("Terminal commands"))
+        cmds.box.addWidget(muted("Open Konsole and type these — or \"horizon help\" for the full list."))
+        for command, what in [
+            ("horizon update", "Update apps, the system and firmware in one go"),
+            ("horizon install <app>", "Install from Ubuntu, a downloaded .deb, or Flathub"),
+            ("horizon doctor", "Check your system's health, with tips"),
+            ("horizon uefi", "Boot mode, Secure Boot and firmware; restart into UEFI"),
+            ("horizonfetch", "Show system info with the Horizon logo"),
+        ]:
+            line = QHBoxLayout()
+            k = QLabel(command)
+            k.setObjectName("kbd")
+            k.setMinimumWidth(170)
+            k.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            line.addWidget(k)
+            line.addWidget(QLabel(what), 1)
+            cmds.box.addLayout(line)
+        term = QPushButton(QIcon.fromTheme("utilities-terminal"), "  Open Terminal")
+        term.clicked.connect(lambda: subprocess.Popen(["konsole"]))
+        cmds.box.addWidget(term, 0, Qt.AlignmentFlag.AlignLeft)
+
         self.startup = QCheckBox("Show this welcome screen when I log in")
         self.startup.setChecked(kread("horizon-settingsrc", ["Welcome"], "ShowOnStartup", "false") == "true")
         self.startup.toggled.connect(
@@ -596,39 +689,19 @@ class AppearancePage(Page):
             b.setIcon(swatch_icon(color, color == selected))
 
     def set_accent(self, color):
-        run("plasma-apply-colorscheme", "--accent-color", color)
+        apply_accent(color)
         self.accent = color
         self._paint_accents(color)
 
     def set_mode(self, mode):
-        v = THEME_VARIANTS[mode]
-        scheme = first_installed("colorscheme", v["colorscheme"])
-        if scheme:
-            run("plasma-apply-colorscheme", scheme)
-        theme = first_installed("desktoptheme", v["desktoptheme"])
-        if theme:
-            run("plasma-apply-desktoptheme", theme)
-        deco = first_installed("decoration", v["decoration"])
-        if deco:
-            kwrite("kwinrc", ["org.kde.kdecoration2"], "library", "org.kde.kwin.aurorae")
-            kwrite("kwinrc", ["org.kde.kdecoration2"], "theme", f"__aurorae__svg__{deco}")
-            kwin_reconfigure()
-        kv = first_installed("kvantum", v["kvantum"])
-        if kv:
-            kwrite("Kvantum/kvantum.kvconfig", ["General"], "theme", kv)
-        icons = first_installed("icons", v["icons"])
+        icons = apply_mode(mode)
         if icons:
-            self.icons.setCurrentText(icons)  # triggers set_icons
-        # Re-apply the chosen accent on top of the new scheme.
-        if self.accent:
-            run("plasma-apply-colorscheme", "--accent-color", self.accent)
+            self.icons.blockSignals(True)
+            self.icons.setCurrentText(icons)
+            self.icons.blockSignals(False)
 
     def set_icons(self, name):
-        tool = libexec("plasma-changeicons")
-        if tool:
-            run(tool, name)
-        else:
-            kwrite("kdeglobals", ["Icons"], "Theme", name)
+        apply_icons(name)
 
     def pick_wallpaper(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -638,71 +711,359 @@ class AppearancePage(Page):
             run("plasma-apply-wallpaperimage", path)
 
 
-DOCK_QUERY = """
-var out = {found: false};
+# --------------------------------------------------------------------------
+# Panels: dock and top bar (shared by the GUI and `horizon-settings --set`)
+# --------------------------------------------------------------------------
+
+JS_HELPERS = """
+function horizonTasks(p) {
+    return [].concat(p.widgets("org.kde.plasma.icontasks"), p.widgets("org.kde.plasma.taskmanager"));
+}
+function horizonIsDock(p) { return horizonTasks(p).length > 0; }
+function horizonIsTopBar(p) { return p.location == "top" && !horizonIsDock(p); }
+"""
+
+PANEL_QUERY = JS_HELPERS + """
+var out = {dock: null, top: null};
 panels().forEach(function (p) {
-    var isDock = %s.some(function (t) { return p.widgets(t).length > 0; });
-    if (isDock && !out.found) {
-        out = {found: true, location: p.location, height: p.height,
-               hiding: p.hiding, floating: p.floating};
+    if (horizonIsDock(p) && !out.dock) {
+        var t = horizonTasks(p)[0];
+        t.currentConfigGroup = ["General"];
+        out.dock = {
+            location: p.location, height: p.height, hiding: p.hiding, floating: p.floating,
+            alignment: p.alignment, lengthMode: p.lengthMode,
+            launchers: t.readConfig("launchers", []),
+            iconSpacing: t.readConfig("iconSpacing", 1),
+            groupingStrategy: t.readConfig("groupingStrategy", 1),
+            showOnlyCurrentDesktop: t.readConfig("showOnlyCurrentDesktop", false),
+            indicateAudioStreams: t.readConfig("indicateAudioStreams", true),
+            highlightWindows: t.readConfig("highlightWindows", true),
+            launchpad: p.widgets("org.kde.plasma.kickerdash").length > 0,
+            trash: p.widgets("org.kde.plasma.trash").length > 0,
+            classic: p.widgets("org.kde.plasma.systemtray").length > 0
+        };
+    } else if (horizonIsTopBar(p) && !out.top) {
+        var c = p.widgets("org.kde.plasma.digitalclock");
+        var ids = p.widgetIds.map(function (id) { return p.widgetById(id).type; });
+        var clock = {};
+        if (c.length) {
+            c[0].currentConfigGroup = ["Appearance"];
+            clock = {showDate: c[0].readConfig("showDate", true),
+                     showSeconds: c[0].readConfig("showSeconds", 0),
+                     use24hFormat: c[0].readConfig("use24hFormat", 1)};
+        }
+        var clockPos = ids.indexOf("org.kde.plasma.digitalclock");
+        out.top = {height: p.height, floating: p.floating, clock: clock,
+                   appmenu: ids.indexOf("org.kde.plasma.appmenu") >= 0,
+                   centerClock: clockPos > 0 && clockPos < ids.length - 1};
     }
 });
 print(JSON.stringify(out));
-""" % json.dumps(list(TASK_WIDGETS))
-
-DOCK_UPDATE = """
-panels().forEach(function (p) {
-    var isDock = %s.some(function (t) { return p.widgets(t).length > 0; });
-    if (isDock) { %s }
-});
 """
+
+
+def _truthy(v, default=False):
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return default
+    return str(v).lower() in ("true", "1", "2")
+
+
+def panel_state():
+    """Current dock/top bar settings, read live from Plasma (None when unavailable)."""
+    try:
+        state = json.loads(plasma_script(PANEL_QUERY) or "{}")
+    except (TypeError, ValueError):
+        return {}
+    dock = state.get("dock")
+    if dock:
+        launchers = dock.get("launchers") or []
+        if isinstance(launchers, str):
+            launchers = [l for l in launchers.split(",") if l]
+        dock["launchers"] = launchers
+        for key, default in (("floating", True), ("showOnlyCurrentDesktop", False),
+                             ("indicateAudioStreams", True), ("highlightWindows", True)):
+            dock[key] = _truthy(dock.get(key), default)
+        for key, default in (("iconSpacing", 1), ("groupingStrategy", 1), ("height", 58)):
+            try:
+                dock[key] = int(dock.get(key, default))
+            except (TypeError, ValueError):
+                dock[key] = default
+    return state
+
+
+def js(value):
+    return json.dumps(value)
+
+
+def dock_update(body):
+    """Run JavaScript `body` with `p` = the dock panel and `t` = its task manager."""
+    plasma_script(JS_HELPERS + """
+panels().forEach(function (p) {
+    if (!horizonIsDock(p)) return;
+    var t = horizonTasks(p)[0];
+    t.currentConfigGroup = ["General"];
+    %s
+    t.reloadConfig();
+});
+""" % body)
+
+
+def dock_set_task_option(key, value):
+    dock_update(f"t.writeConfig({js(key)}, {js(value)});")
+
+
+def dock_set_launchers(launchers):
+    dock_update(f"t.writeConfig('launchers', {js(list(launchers))});")
+
+
+def normalize_app(app):
+    app = app.strip()
+    if app.startswith("applications:"):
+        return app
+    if not app.endswith(".desktop"):
+        app += ".desktop"
+    return "applications:" + app
+
+
+def dock_js(d):
+    """JavaScript that creates a dock panel from settings dict `d`."""
+    lines = [
+        "var dock = new Panel;",
+        f"dock.location = {js(d.get('location', 'bottom'))};",
+        f"dock.height = {int(d.get('height', 58))};",
+        f"dock.alignment = {js(d.get('alignment', 'center'))};",
+        f"dock.lengthMode = {js(d.get('lengthMode', 'fit'))};",
+        f"dock.floating = {js(bool(d.get('floating', True)))};",
+        f"dock.hiding = {js(d.get('hiding', 'dodgewindows'))};",
+    ]
+    if d.get("launchpad", True):
+        lines += ['var lp = dock.addWidget("org.kde.plasma.kickerdash");',
+                  'lp.currentConfigGroup = ["General"];',
+                  'lp.writeConfig("icon", "horizon-launchpad");']
+    lines += ['var t = dock.addWidget("org.kde.plasma.icontasks");',
+              't.currentConfigGroup = ["General"];',
+              f"t.writeConfig('launchers', {js(d.get('launchers', []))});"]
+    for key in ("iconSpacing", "groupingStrategy", "showOnlyCurrentDesktop",
+                "indicateAudioStreams", "highlightWindows"):
+        if key in d:
+            lines.append(f"t.writeConfig({js(key)}, {js(d[key])});")
+    if d.get("trash", True):
+        lines += ['dock.addWidget("org.kde.plasma.marginsseparator");',
+                  'dock.addWidget("org.kde.plasma.trash");']
+    return "\n".join(lines)
+
+
+def dock_rebuild(d):
+    plasma_script(JS_HELPERS + """
+panels().forEach(function (p) { if (horizonIsDock(p)) p.remove(); });
+""" + dock_js(d))
+
+
+def topbar_js(t):
+    clock = t.get("clock", {})
+    lines = [
+        "var top = new Panel;",
+        'top.location = "top";',
+        f"top.height = {int(t.get('height', 28))};",
+        f"top.floating = {js(bool(t.get('floating', False)))};",
+        'var menu = top.addWidget("org.kde.plasma.kickoff");',
+        'menu.currentConfigGroup = ["General"];',
+        'menu.writeConfig("icon", "horizon-logo-symbolic");',
+    ]
+    if t.get("appmenu", True):
+        lines.append('top.addWidget("org.kde.plasma.appmenu");')
+    lines.append('top.addWidget("org.kde.plasma.panelspacer");')
+    clock_js = [
+        'var clock = top.addWidget("org.kde.plasma.digitalclock");',
+        'clock.currentConfigGroup = ["Appearance"];',
+        f"clock.writeConfig('showDate', {js(_truthy(clock.get('showDate'), True))});",
+        "clock.writeConfig('dateDisplayFormat', 'BesideTime');",
+        "clock.writeConfig('dateFormat', 'custom');",
+        "clock.writeConfig('customDateFormat', 'ddd d MMM');",
+        f"clock.writeConfig('showSeconds', {int(clock.get('showSeconds', 0) or 0)});",
+        f"clock.writeConfig('use24hFormat', {int(clock.get('use24hFormat', 1) or 0)});",
+    ]
+    if t.get("centerClock"):
+        lines += clock_js + ['top.addWidget("org.kde.plasma.panelspacer");',
+                             'top.addWidget("org.kde.plasma.systemtray");']
+    else:
+        lines += ['top.addWidget("org.kde.plasma.systemtray");'] + clock_js
+    return "\n".join(lines)
+
+
+def topbar_rebuild(t):
+    plasma_script(JS_HELPERS + """
+panels().forEach(function (p) { if (horizonIsTopBar(p)) p.remove(); });
+""" + topbar_js(t))
+
+
+def topbar_update(body):
+    plasma_script(JS_HELPERS + """
+panels().forEach(function (p) {
+    if (!horizonIsTopBar(p)) return;
+    var c = p.widgets("org.kde.plasma.digitalclock");
+    %s
+});
+""" % body)
+
+
+def clock_set(key, value):
+    topbar_update(f"""if (c.length) {{ c[0].currentConfigGroup = ["Appearance"];
+        c[0].writeConfig({js(key)}, {js(value)}); c[0].reloadConfig(); }}""")
+
+
+def apply_layout(key):
+    path = LAYOUT_DIR / f"{key}.js"
+    if not path.exists():
+        return False
+    plasma_script("panels().forEach(function (p) { p.remove(); });\n" + path.read_text())
+    kwrite("horizon-settingsrc", ["Layout"], "Current", key)
+    return True
+
+
+SPACING = [("Tight", 0), ("Normal", 1), ("Roomy", 2), ("Spacious", 3)]
+GROUPING = [("Group windows of the same app", 1), ("Show every window separately", 0)]
+ALIGNMENTS = [("Centered", "center"), ("Start", "left"), ("End", "right")]
+LENGTHS = [("Fit the icons", "fit"), ("Full width", "fill")]
+
+
+def installed_apps():
+    """(name, icon, desktop file id) of every visible app, sorted by name."""
+    apps, seen = [], set()
+    for base in (os.path.expanduser("~/.local/share/applications"), "/usr/share/applications",
+                 "/var/lib/flatpak/exports/share/applications"):
+        folder = Path(base)
+        if not folder.is_dir():
+            continue
+        for f in sorted(folder.glob("*.desktop")):
+            if f.name in seen:
+                continue
+            text = f.read_text(errors="ignore")
+            if "NoDisplay=true" in text or "Type=Application" not in text:
+                continue
+            lines = text.split("\n[", 1)[0].splitlines()
+            name = next((l[5:] for l in lines if l.startswith("Name=")), f.stem)
+            icon = next((l[5:] for l in lines if l.startswith("Icon=")), "")
+            apps.append((name, icon, f.name))
+            seen.add(f.name)
+    return sorted(apps, key=lambda a: a[0].lower())
+
+
+class AppPicker(QDialog):
+    """Searchable list of installed apps."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add to dock")
+        self.resize(420, 520)
+        box = QVBoxLayout(self)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search apps…")
+        self.search.setClearButtonEnabled(True)
+        box.addWidget(self.search)
+        self.list = QListWidget()
+        self.list.setIconSize(QSize(28, 28))
+        for name, icon, fid in installed_apps():
+            item = QListWidgetItem(QIcon.fromTheme(icon, QIcon.fromTheme("application-x-executable")), name)
+            item.setData(Qt.ItemDataRole.UserRole, fid)
+            self.list.addItem(item)
+        box.addWidget(self.list, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        box.addWidget(buttons)
+        self.search.textChanged.connect(self.filter)
+        self.list.itemDoubleClicked.connect(lambda _: self.accept())
+
+    def filter(self, text):
+        text = text.lower()
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            item.setHidden(text not in item.text().lower())
+
+    def chosen(self):
+        item = self.list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
 
 
 class DockPage(Page):
     def __init__(self):
-        super().__init__("Dock & Layout", "Arrange your panels the way you like them.")
+        super().__init__("Dock & Menu Bar", "Arrange your panels the way you like them.")
 
         layouts = self.add(Card("Desktop layout"))
         layouts.box.addWidget(muted("Replaces your current panels with a fresh preset."))
         self.layout_cards = ChoiceCards(
-            [(k, name, layout_preview(k)) for k, name, _ in LAYOUTS if (LAYOUT_DIR / f"{k}.js").exists()]
-            or [(k, name, layout_preview(k)) for k, name, _ in LAYOUTS],
-            self.apply_layout)
+            [(k, name, layout_preview(k)) for k, name, _ in LAYOUTS], self.apply_layout)
         layouts.box.addWidget(self.layout_cards)
-        for k, name, desc in LAYOUTS:
-            if k in self.layout_cards.buttons:
-                self.layout_cards.buttons[k].setToolTip(desc)
+        for k, _, desc in LAYOUTS:
+            self.layout_cards.buttons[k].setToolTip(desc)
+        self.layout_cards.select(kread("horizon-settingsrc", ["Layout"], "Current", "macos"))
 
+        # -------- dock: live settings
         dock = self.add(Card("Dock"))
-        self.position = QComboBox()
-        for label, loc in (("Bottom", "bottom"), ("Left", "left"), ("Right", "right")):
-            self.position.addItem(label, loc)
-        dock.row("Position on screen", self.position)
-
+        self.dock_note = muted("")
+        dock.box.addWidget(self.dock_note)
+        self.position = dock.row("Position on screen", self._combo(
+            [("Bottom", "bottom"), ("Left", "left"), ("Right", "right")]))
+        self.alignment = dock.row("Alignment", self._combo(ALIGNMENTS))
+        self.length = dock.row("Width", self._combo(LENGTHS))
         self.size = QSlider(Qt.Orientation.Horizontal)
-        self.size.setRange(36, 110)
+        self.size.setRange(36, 120)
         self.size.setMinimumWidth(220)
-        dock.row("Size", self.size)
+        self.size_label = QLabel()
+        self.size_label.setMinimumWidth(48)
+        wrap = QWidget()
+        h = QHBoxLayout(wrap)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(self.size)
+        h.addWidget(self.size_label)
+        dock.row("Size", wrap)
+        self.hiding = dock.row("Visibility", self._combo(DOCK_HIDING))
+        self.floating = dock.row("Floating", QCheckBox(), "Leave a gap between the dock and the screen edge")
 
-        self.hiding = QComboBox()
-        for label, value in DOCK_HIDING:
-            self.hiding.addItem(label, value)
-        dock.row("Visibility", self.hiding)
+        # -------- dock: icons behaviour
+        icons = self.add(Card("Dock icons"))
+        self.spacing = icons.row("Icon spacing", self._combo(SPACING))
+        self.grouping = icons.row("Windows", self._combo(GROUPING))
+        self.only_desktop = icons.row("Only show apps from the current desktop", QCheckBox())
+        self.audio = icons.row("Show a speaker on apps playing sound", QCheckBox())
+        self.highlight = icons.row("Highlight windows when hovering an icon", QCheckBox())
+        self.launchpad = icons.row("Show Launchpad", QCheckBox(), "The app grid button at the start of the dock")
+        self.trash = icons.row("Show Trash", QCheckBox())
 
-        self.floating = QCheckBox()
-        dock.row("Floating", self.floating, "Leave a gap between the dock and the screen edge")
+        # -------- pinned apps
+        pinned = self.add(Card("Pinned apps"))
+        pinned.box.addWidget(muted("Apps that always stay in the dock. You can also drag apps onto the dock."))
+        self.pins = QListWidget()
+        self.pins.setIconSize(QSize(28, 28))
+        self.pins.setMinimumHeight(190)
+        pinned.box.addWidget(self.pins)
+        buttons = QHBoxLayout()
+        for text, slot in (("Add app…", self.add_pin), ("Remove", self.remove_pin),
+                           ("Move up", lambda: self.move_pin(-1)), ("Move down", lambda: self.move_pin(1))):
+            b = QPushButton(text)
+            b.clicked.connect(slot)
+            buttons.addWidget(b)
+        buttons.addStretch(1)
+        pinned.box.addLayout(buttons)
 
-        self._load_dock()
-        self.position.currentIndexChanged.connect(
-            lambda: self.update_dock(f'p.location = "{self.position.currentData()}";'))
-        self.hiding.currentIndexChanged.connect(
-            lambda: self.update_dock(f'p.hiding = "{self.hiding.currentData()}";'))
-        self.floating.toggled.connect(
-            lambda on: self.update_dock(f"p.floating = {'true' if on else 'false'};"))
-        # Debounce the size slider so Plasma isn't flooded while dragging.
-        self._size_timer = QTimer(self, singleShot=True, interval=250)
-        self._size_timer.timeout.connect(lambda: self.update_dock(f"p.height = {self.size.value()};"))
-        self.size.valueChanged.connect(lambda: self._size_timer.start())
+        # -------- top bar
+        top = self.add(Card("Menu bar"))
+        self.top_note = muted("")
+        top.box.addWidget(self.top_note)
+        self.top_height = QSlider(Qt.Orientation.Horizontal)
+        self.top_height.setRange(22, 44)
+        self.top_height.setMinimumWidth(220)
+        top.row("Height", self.top_height)
+        self.top_floating = top.row("Floating", QCheckBox())
+        self.appmenu = top.row("Show app menus in the bar", QCheckBox(), "File, Edit, View… like on a Mac")
+        self.center_clock = top.row("Clock in the middle", QCheckBox())
+        self.show_date = top.row("Show the date", QCheckBox())
+        self.seconds = top.row("Show seconds", QCheckBox())
+        self.clock24 = top.row("Time format", self._combo(
+            [("Follow region", 1), ("24-hour", 2), ("12-hour (AM/PM)", 0)]))
 
         more = self.add(Card())
         btn = QPushButton("Edit panels and widgets…")
@@ -711,41 +1072,201 @@ class DockPage(Page):
         more.row("Add widgets, move icons or resize panels by hand", btn)
         self.finish()
 
-    def _load_dock(self):
-        state = {}
-        try:
-            state = json.loads(plasma_script(DOCK_QUERY) or "{}")
-        except (TypeError, ValueError):
-            pass
-        widgets = (self.position, self.size, self.hiding, self.floating)
-        for w in widgets:
-            w.blockSignals(True)
-        self.position.setCurrentIndex(max(0, self.position.findData(state.get("location", "bottom"))))
-        self.size.setValue(int(state.get("height", 58)))
-        self.hiding.setCurrentIndex(max(0, self.hiding.findData(state.get("hiding", "dodgewindows"))))
-        self.floating.setChecked(bool(state.get("floating", True)))
-        for w in widgets:
-            w.blockSignals(False)
-        for w in widgets:
-            w.setEnabled(bool(state.get("found", False)) or not state)
+        self.state = {}
+        self.reload()
+        self._connect()
 
-    def update_dock(self, js):
-        plasma_script(DOCK_UPDATE % (json.dumps(list(TASK_WIDGETS)), js))
+    @staticmethod
+    def _combo(options):
+        c = QComboBox()
+        for label, value in options:
+            c.addItem(label, value)
+        return c
+
+    def _controls(self):
+        return [self.position, self.alignment, self.length, self.size, self.hiding, self.floating,
+                self.spacing, self.grouping, self.only_desktop, self.audio, self.highlight,
+                self.launchpad, self.trash, self.top_height, self.top_floating, self.appmenu,
+                self.center_clock, self.show_date, self.seconds, self.clock24]
+
+    def reload(self):
+        self.state = panel_state()
+        d = self.state.get("dock") or {}
+        t = self.state.get("top") or {}
+        for w in self._controls():
+            w.blockSignals(True)
+
+        def pick(combo, value, default):
+            i = combo.findData(value)
+            combo.setCurrentIndex(i if i >= 0 else max(0, combo.findData(default)))
+
+        pick(self.position, d.get("location"), "bottom")
+        pick(self.alignment, d.get("alignment"), "center")
+        pick(self.length, d.get("lengthMode"), "fit")
+        self.size.setValue(int(d.get("height", 58)))
+        self.size_label.setText(f"{self.size.value()} px")
+        pick(self.hiding, d.get("hiding"), "dodgewindows")
+        self.floating.setChecked(d.get("floating", True))
+        pick(self.spacing, d.get("iconSpacing"), 1)
+        pick(self.grouping, 0 if d.get("groupingStrategy") == 0 else 1, 1)
+        self.only_desktop.setChecked(d.get("showOnlyCurrentDesktop", False))
+        self.audio.setChecked(d.get("indicateAudioStreams", True))
+        self.highlight.setChecked(d.get("highlightWindows", True))
+        self.launchpad.setChecked(d.get("launchpad", True))
+        self.trash.setChecked(d.get("trash", True))
+        self._fill_pins(d.get("launchers", []))
+
+        clock = t.get("clock", {})
+        self.top_height.setValue(int(t.get("height", 28) or 28))
+        self.top_floating.setChecked(_truthy(t.get("floating"), False))
+        self.appmenu.setChecked(t.get("appmenu", True))
+        self.center_clock.setChecked(t.get("centerClock", False))
+        self.show_date.setChecked(_truthy(clock.get("showDate"), True))
+        self.seconds.setChecked(str(clock.get("showSeconds", 0)) not in ("0", "", "false"))
+        try:
+            pick(self.clock24, int(clock.get("use24hFormat", 1)), 1)
+        except (TypeError, ValueError):
+            pick(self.clock24, 1, 1)
+        for w in self._controls():
+            w.blockSignals(False)
+
+        live = bool(self.state)
+        has_dock, has_top = bool(self.state.get("dock")), bool(self.state.get("top"))
+        classic = bool(d.get("classic"))
+        for w in (self.position, self.alignment, self.length, self.size, self.hiding, self.floating,
+                  self.spacing, self.grouping, self.only_desktop, self.audio, self.highlight, self.pins):
+            w.setEnabled(has_dock or not live)
+        for w in (self.launchpad, self.trash):
+            w.setEnabled((has_dock and not classic) or not live)
+        for w in (self.top_height, self.top_floating, self.appmenu, self.center_clock,
+                  self.show_date, self.seconds, self.clock24):
+            w.setEnabled(has_top or not live)
+        self.dock_note.setText("" if has_dock or not live else "No dock found — pick a layout above.")
+        self.dock_note.setVisible(bool(self.dock_note.text()))
+        self.top_note.setText("" if has_top or not live else "No menu bar in this layout.")
+        self.top_note.setVisible(bool(self.top_note.text()))
+
+    def _connect(self):
+        self.position.currentIndexChanged.connect(
+            lambda: dock_update(f"p.location = {js(self.position.currentData())};"))
+        self.alignment.currentIndexChanged.connect(
+            lambda: dock_update(f"p.alignment = {js(self.alignment.currentData())};"))
+        self.length.currentIndexChanged.connect(
+            lambda: dock_update(f"p.lengthMode = {js(self.length.currentData())};"))
+        self.hiding.currentIndexChanged.connect(
+            lambda: dock_update(f"p.hiding = {js(self.hiding.currentData())};"))
+        self.floating.toggled.connect(lambda on: dock_update(f"p.floating = {js(on)};"))
+        # Debounce sliders so Plasma isn't flooded while dragging.
+        self._size_timer = QTimer(self, singleShot=True, interval=250)
+        self._size_timer.timeout.connect(lambda: dock_update(f"p.height = {self.size.value()};"))
+        self.size.valueChanged.connect(lambda v: (self.size_label.setText(f"{v} px"), self._size_timer.start()))
+        self.spacing.currentIndexChanged.connect(
+            lambda: dock_set_task_option("iconSpacing", self.spacing.currentData()))
+        self.grouping.currentIndexChanged.connect(
+            lambda: dock_set_task_option("groupingStrategy", self.grouping.currentData()))
+        self.only_desktop.toggled.connect(lambda on: dock_set_task_option("showOnlyCurrentDesktop", on))
+        self.audio.toggled.connect(lambda on: dock_set_task_option("indicateAudioStreams", on))
+        self.highlight.toggled.connect(lambda on: dock_set_task_option("highlightWindows", on))
+        self.launchpad.toggled.connect(lambda _: self.rebuild_dock())
+        self.trash.toggled.connect(lambda _: self.rebuild_dock())
+
+        self._top_timer = QTimer(self, singleShot=True, interval=250)
+        self._top_timer.timeout.connect(lambda: topbar_update(f"p.height = {self.top_height.value()};"))
+        self.top_height.valueChanged.connect(lambda: self._top_timer.start())
+        self.top_floating.toggled.connect(lambda on: topbar_update(f"p.floating = {js(on)};"))
+        self.appmenu.toggled.connect(lambda _: self.rebuild_top())
+        self.center_clock.toggled.connect(lambda _: self.rebuild_top())
+        self.show_date.toggled.connect(lambda on: clock_set("showDate", on))
+        self.seconds.toggled.connect(lambda on: clock_set("showSeconds", 2 if on else 0))
+        self.clock24.currentIndexChanged.connect(lambda: clock_set("use24hFormat", self.clock24.currentData()))
+
+    # ---- pinned apps
+    def _fill_pins(self, launchers):
+        self.pins.clear()
+        for entry in launchers:
+            desktop_id = entry.split(":", 1)[-1]
+            name, icon = desktop_id, "application-x-executable"
+            for base in ("/usr/share/applications", os.path.expanduser("~/.local/share/applications"),
+                         "/var/lib/flatpak/exports/share/applications"):
+                f = Path(base) / desktop_id
+                if f.exists():
+                    for line in f.read_text(errors="ignore").splitlines():
+                        if line.startswith("Name=") and name == desktop_id:
+                            name = line[5:]
+                        elif line.startswith("Icon="):
+                            icon = line[5:]
+                        elif line.startswith("[") and line != "[Desktop Entry]":
+                            break
+                    break
+            item = QListWidgetItem(QIcon.fromTheme(icon), name)
+            item.setData(Qt.ItemDataRole.UserRole, entry)
+            self.pins.addItem(item)
+
+    def _pins(self):
+        return [self.pins.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.pins.count())]
+
+    def _save_pins(self):
+        dock_set_launchers(self._pins())
+
+    def add_pin(self):
+        picker = AppPicker(self)
+        if picker.exec() == QDialog.DialogCode.Accepted and picker.chosen():
+            entry = normalize_app(picker.chosen())
+            if entry not in self._pins():
+                self._fill_pins(self._pins() + [entry])
+                self._save_pins()
+
+    def remove_pin(self):
+        row = self.pins.currentRow()
+        if row >= 0:
+            self.pins.takeItem(row)
+            self._save_pins()
+
+    def move_pin(self, delta):
+        row = self.pins.currentRow()
+        new = row + delta
+        if row < 0 or not 0 <= new < self.pins.count():
+            return
+        item = self.pins.takeItem(row)
+        self.pins.insertItem(new, item)
+        self.pins.setCurrentRow(new)
+        self._save_pins()
+
+    # ---- rebuilds
+    def _dock_settings(self):
+        d = dict(self.state.get("dock") or {})
+        d.update(location=self.position.currentData(), alignment=self.alignment.currentData(),
+                 lengthMode=self.length.currentData(), height=self.size.value(),
+                 hiding=self.hiding.currentData(), floating=self.floating.isChecked(),
+                 iconSpacing=self.spacing.currentData(), groupingStrategy=self.grouping.currentData(),
+                 showOnlyCurrentDesktop=self.only_desktop.isChecked(),
+                 indicateAudioStreams=self.audio.isChecked(), highlightWindows=self.highlight.isChecked(),
+                 launchpad=self.launchpad.isChecked(), trash=self.trash.isChecked(), launchers=self._pins())
+        return d
+
+    def rebuild_dock(self):
+        dock_rebuild(self._dock_settings())
+        QTimer.singleShot(800, self.reload)
+
+    def rebuild_top(self):
+        topbar_rebuild({
+            "height": self.top_height.value(), "floating": self.top_floating.isChecked(),
+            "appmenu": self.appmenu.isChecked(), "centerClock": self.center_clock.isChecked(),
+            "clock": {"showDate": self.show_date.isChecked(), "showSeconds": 2 if self.seconds.isChecked() else 0,
+                      "use24hFormat": self.clock24.currentData()},
+        })
+        QTimer.singleShot(800, self.reload)
 
     def apply_layout(self, key):
-        path = LAYOUT_DIR / f"{key}.js"
-        if not path.exists():
-            QMessageBox.warning(self, APP_NAME, f"Layout file {path} is missing.")
-            return
         answer = QMessageBox.question(
-            self, APP_NAME,
-            "Switch layout? Your current panels and their widgets will be replaced.")
+            self, APP_NAME, "Switch layout? Your current panels and their widgets will be replaced.")
         if answer != QMessageBox.StandardButton.Yes:
+            self.layout_cards.select(kread("horizon-settingsrc", ["Layout"], "Current", "macos"))
             return
-        script = "panels().forEach(function (p) { p.remove(); });\n" + path.read_text()
-        plasma_script(script)
-        kwrite("horizon-settingsrc", ["Layout"], "Current", key)
-        QTimer.singleShot(1200, self._load_dock)
+        if not apply_layout(key):
+            QMessageBox.warning(self, APP_NAME, f"Layout file for '{key}' is missing.")
+            return
+        QTimer.singleShot(1200, self.reload)
 
 
 class WindowsPage(Page):
@@ -821,29 +1342,171 @@ class WindowsPage(Page):
         return len(options) - 1
 
     def set_exclusive(self, options, chosen):
-        for _, eff in options:
-            if eff:
-                kwin_effect(eff, eff == chosen)
-        kwin_reconfigure()
+        set_exclusive_effect(options, chosen)
 
     def toggle(self, name, on):
-        kwin_effect(name, on)
-        kwin_reconfigure()
+        toggle_effect(name, on)
 
     def set_buttons(self, side):
-        if side == "left":
-            left, right = "XIA", ""
-        else:
-            left, right = "M", "IAX"
-        kwrite("kwinrc", ["org.kde.kdecoration2"], "ButtonsOnLeft", left)
-        kwrite("kwinrc", ["org.kde.kdecoration2"], "ButtonsOnRight", right)
-        kwin_reconfigure()
+        set_title_buttons(side)
 
     def set_speed(self, idx):
         label, factor = ANIMATION_SPEEDS[idx]
         self.speed_label.setText(label)
-        kwrite("kdeglobals", ["KDE"], "AnimationDurationFactor", factor)
-        kwin_reconfigure()
+        set_animation_speed(factor)
+
+
+def read_file(path, default=""):
+    try:
+        return Path(path).read_text(errors="ignore").strip()
+    except OSError:
+        return default
+
+
+def secure_boot_state():
+    if not os.path.isdir("/sys/firmware/efi"):
+        return "Not available (legacy BIOS)"
+    for f in glob.glob("/sys/firmware/efi/efivars/SecureBoot-*"):
+        try:
+            return "On" if Path(f).read_bytes()[-1] == 1 else "Off"
+        except OSError:
+            pass
+    return "Unknown"
+
+
+def grub_setting(key, default=""):
+    value = default
+    for f in ["/etc/default/grub"] + sorted(glob.glob("/etc/default/grub.d/*.cfg")):
+        for line in read_file(f).splitlines():
+            if line.startswith(key + "="):
+                value = line.split("=", 1)[1].strip().strip('"')
+    return value
+
+
+def uefi_entries():
+    """[(number, label, active, current)] from efibootmgr."""
+    res = run("efibootmgr")
+    if not res or res.returncode != 0:
+        return []
+    current = ""
+    entries = []
+    for line in res.stdout.splitlines():
+        if line.startswith("BootCurrent:"):
+            current = line.split(":", 1)[1].strip()
+        m = re.match(r"Boot([0-9A-Fa-f]{4})(\*?)\s+(.*)", line)
+        if m:
+            label = re.split(r"\t|\s{2,}|HD\(|PciRoot\(|VenHw\(|BBS\(", m.group(3))[0].strip()
+            entries.append((m.group(1), label, bool(m.group(2)), m.group(1) == current))
+    return entries
+
+
+def in_terminal(command):
+    """Run a horizon command in Konsole and keep the window open."""
+    subprocess.Popen(["konsole", "--hold", "-e", "bash", "-c", command])
+
+
+class BootPage(Page):
+    def __init__(self):
+        super().__init__("Boot & UEFI", "Firmware, Secure Boot, the boot menu and system maintenance.")
+        efi = os.path.isdir("/sys/firmware/efi")
+
+        info = self.add(Card("This computer"))
+        vendor = read_file("/sys/class/dmi/id/bios_vendor")
+        version = read_file("/sys/class/dmi/id/bios_version")
+        date = read_file("/sys/class/dmi/id/bios_date")
+        esp = ""
+        res = run("findmnt", "-no", "SOURCE,SIZE,AVAIL", "/boot/efi")
+        if res and res.stdout.strip():
+            src, size, avail = (res.stdout.split() + ["", "", ""])[:3]
+            esp = f"{src} — {avail} free of {size}"
+        for label, value in [("Boot mode", "UEFI" if efi else "Legacy BIOS"),
+                             ("Secure Boot", secure_boot_state()),
+                             ("Firmware", " ".join(p for p in (vendor, version) if p)),
+                             ("Firmware date", date), ("EFI partition", esp)]:
+            if value:
+                v = QLabel(value)
+                v.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                info.row(label, v)
+
+        uefi = self.add(Card("UEFI"))
+        fw = QPushButton("Restart into firmware settings…")
+        fw.setEnabled(efi)
+        fw.clicked.connect(self.firmware_setup)
+        uefi.row("Change boot order, Secure Boot, virtualization and other firmware options", fw)
+        upd = QPushButton("Check for firmware updates")
+        upd.clicked.connect(lambda: subprocess.Popen(["plasma-discover", "--mode", "update"]))
+        uefi.row("UEFI, SSD and device firmware from the vendor (via fwupd)", upd)
+        if efi:
+            self.entries = QListWidget()
+            self.entries.setMinimumHeight(120)
+            for num, label, active, current in uefi_entries():
+                text = f"{num}  {label}" + ("   (running now)" if current else "") + ("" if active else "   (disabled)")
+                item = QListWidgetItem(QIcon.fromTheme("drive-harddisk"), text)
+                item.setData(Qt.ItemDataRole.UserRole, num)
+                self.entries.addItem(item)
+            uefi.box.addWidget(QLabel("Boot entries"))
+            uefi.box.addWidget(self.entries)
+            once = QPushButton("Start the selected entry once on next restart")
+            once.clicked.connect(self.boot_once)
+            uefi.box.addWidget(once, 0, Qt.AlignmentFlag.AlignLeft)
+
+        menu = self.add(Card("Boot menu"))
+        installed = Path("/etc/default/grub").exists() and not is_live_session()
+        if not installed:
+            menu.box.addWidget(muted("Available after installing to disk."))
+        self.show_menu = menu.row("Show the boot menu at startup", QCheckBox(),
+                                  "Otherwise hold Shift (BIOS) or press Esc (UEFI) while starting")
+        self.show_menu.setChecked(grub_setting("GRUB_TIMEOUT_STYLE", "menu") == "menu")
+        self.timeout = QSpinBox()
+        self.timeout.setRange(1, 30)
+        self.timeout.setSuffix(" s")
+        try:
+            self.timeout.setValue(int(grub_setting("GRUB_TIMEOUT", "3") or 3))
+        except ValueError:
+            self.timeout.setValue(3)
+        menu.row("Wait before starting", self.timeout)
+        self.themed = menu.row("Graphical boot menu", QCheckBox())
+        self.themed.setChecked(bool(grub_setting("GRUB_THEME")))
+        apply_btn = QPushButton("Apply…")
+        apply_btn.clicked.connect(self.apply_boot_menu)
+        menu.row("Needs your password", apply_btn)
+        for w in (self.show_menu, self.timeout, self.themed, apply_btn):
+            w.setEnabled(installed)
+
+        care = self.add(Card("Maintenance"))
+        for label, hint, command in [
+            ("Update everything", "System packages, Flatpak apps and firmware", "horizon update"),
+            ("Health check", "Disk space, services, drivers, firewall, backups", "horizon doctor"),
+            ("Recommended drivers", "Graphics and Wi-Fi drivers for this computer", "horizon drivers list"),
+            ("Free up space", "Old packages, caches and logs", "horizon clean"),
+        ]:
+            b = QPushButton(label)
+            b.clicked.connect(lambda _=False, c=command: in_terminal(c))
+            care.row(hint, b)
+        self.finish()
+
+    def firmware_setup(self):
+        if QMessageBox.question(self, APP_NAME, "Restart now into the UEFI firmware settings?\n"
+                                "Save your work first.") == QMessageBox.StandardButton.Yes:
+            run("systemctl", "reboot", "--firmware-setup")
+
+    def boot_once(self):
+        item = self.entries.currentItem()
+        if item:
+            num = item.data(Qt.ItemDataRole.UserRole)
+            res = run("pkexec", "horizon", "-y", "uefi", "next", num)
+            if res and res.returncode == 0:
+                QMessageBox.information(self, APP_NAME, f"Entry {num} will start once on the next restart.")
+
+    def apply_boot_menu(self):
+        res = run("pkexec", "horizon", "-y", "boot", "set",
+                  f"menu={'on' if self.show_menu.isChecked() else 'off'}",
+                  f"timeout={self.timeout.value()}",
+                  f"theme={'on' if self.themed.isChecked() else 'off'}")
+        if res and res.returncode == 0:
+            QMessageBox.information(self, APP_NAME, "Boot menu updated.")
+        elif res:
+            QMessageBox.warning(self, APP_NAME, "Could not update the boot menu.\n\n" + (res.stderr or res.stdout)[-600:])
 
 
 class AboutPage(Page):
@@ -919,8 +1582,9 @@ QLabel#kbd { font-family: monospace; }
 PAGES = [
     ("welcome", "Welcome", "horizon-logo"),
     ("appearance", "Appearance", "preferences-desktop-theme"),
-    ("dock", "Dock & Layout", "preferences-desktop"),
+    ("dock", "Dock & Menu Bar", "preferences-desktop"),
     ("windows", "Windows & Animations", "preferences-system-windows-effect"),
+    ("boot", "Boot & UEFI", "preferences-system-startup"),
     ("about", "About", "help-about"),
 ]
 
@@ -955,6 +1619,7 @@ class MainWindow(QMainWindow):
             "appearance": AppearancePage,
             "dock": DockPage,
             "windows": WindowsPage,
+            "boot": BootPage,
             "about": AboutPage,
         }
         self.keys = []
@@ -979,12 +1644,80 @@ def should_show_welcome():
     return always or not shown
 
 
+ACCENT_NAMES = {name.lower(): color for name, color in ACCENTS}
+VISIBILITY = {"always": "none", "dodge": "dodgewindows", "auto": "autohide",
+              "none": "none", "dodgewindows": "dodgewindows", "autohide": "autohide"}
+LAYOUT_ALIASES = {"macos": "macos", "mac": "macos", "focus": "focus", "classic": "windows", "windows": "windows"}
+ON = ("on", "true", "yes", "1")
+
+
+def cli_set(pairs):
+    """Non-GUI changes, used by the `horizon` command: KEY=VALUE pairs."""
+    from PyQt6.QtCore import QCoreApplication
+    QCoreApplication([sys.argv[0]])  # needed for D-Bus
+    errors = 0
+    for pair in pairs:
+        key, _, value = pair.partition("=")
+        value = value.strip()
+        try:
+            if key == "mode" and value in ("light", "dark"):
+                apply_mode(value)
+            elif key == "accent":
+                color = ACCENT_NAMES.get(value.lower(), value)
+                if not QColor(color).isValid():
+                    raise ValueError(f"unknown colour '{value}'")
+                apply_accent(QColor(color).name())
+            elif key == "layout" and value in LAYOUT_ALIASES:
+                apply_layout(LAYOUT_ALIASES[value])
+            elif key == "dock-position" and value in ("bottom", "left", "right"):
+                dock_update(f"p.location = {js(value)};")
+            elif key == "dock-size" and value.isdigit():
+                dock_update(f"p.height = {max(24, min(160, int(value)))};")
+            elif key == "dock-alignment" and value in ("left", "center", "right"):
+                dock_update(f"p.alignment = {js(value)};")
+            elif key == "dock-visibility" and value in VISIBILITY:
+                dock_update(f"p.hiding = {js(VISIBILITY[value])};")
+            elif key == "dock-floating":
+                dock_update(f"p.floating = {js(value.lower() in ON)};")
+            elif key in ("dock-pin", "dock-unpin"):
+                entry = normalize_app(value)
+                launchers = (panel_state().get("dock") or {}).get("launchers", [])
+                if key == "dock-pin" and entry not in launchers:
+                    launchers.append(entry)
+                elif key == "dock-unpin":
+                    launchers = [l for l in launchers if l != entry]
+                dock_set_launchers(launchers)
+            elif key == "buttons" and value in ("left", "right"):
+                set_title_buttons(value)
+            elif key == "animations":
+                factor = dict((label.lower(), f) for label, f in ANIMATION_SPEEDS).get(value.lower())
+                if factor is None:
+                    raise ValueError("use one of: " + ", ".join(l.lower() for l, _ in ANIMATION_SPEEDS))
+                set_animation_speed(factor)
+            elif key in ("wobbly", "blur"):
+                toggle_effect("wobblywindows" if key == "wobbly" else "blur", value.lower() in ON)
+            else:
+                raise ValueError("unknown setting or value")
+            print(f"✓ {key} = {value}")
+        except ValueError as exc:
+            print(f"✗ {pair}: {exc}", file=sys.stderr)
+            errors += 1
+    return 1 if errors else 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--page", choices=[p[0] for p in PAGES], help="page to open")
     parser.add_argument("--welcome", action="store_true",
                         help="autostart mode: show the welcome page on first login only")
+    parser.add_argument("--set", nargs="+", metavar="KEY=VALUE",
+                        help="change settings without opening the window: mode, accent, layout, "
+                             "dock-position, dock-size, dock-alignment, dock-visibility, dock-floating, "
+                             "dock-pin, dock-unpin, buttons, animations, wobbly, blur")
     args, qt_args = parser.parse_known_args()
+
+    if args.set:
+        return cli_set(args.set)
 
     if args.welcome:
         if not should_show_welcome():

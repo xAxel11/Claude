@@ -1,0 +1,13 @@
+[Unit]
+Description=Horizon OS first-boot setup (firewall, Flathub)
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=!/var/lib/horizon/firstboot.done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/horizon/firstboot
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

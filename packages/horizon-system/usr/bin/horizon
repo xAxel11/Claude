@@ -1,0 +1,448 @@
+#!/usr/bin/env bash
+# horizon — one command for everyday @DISTRO_NAME@ maintenance.
+# Run "horizon help" for the list of commands.
+set -uo pipefail
+
+VERSION="@DISTRO_VERSION@"
+NAME="@DISTRO_NAME@"
+[[ $NAME == @* ]] && NAME="Horizon OS"
+GRUB_USER_CFG=/etc/default/grub.d/99-horizon-user.cfg
+
+if [[ -t 1 ]]; then
+    B=$'\e[1m' R=$'\e[0m' BLUE=$'\e[38;5;75m' GREEN=$'\e[38;5;114m'
+    YELLOW=$'\e[38;5;221m' RED=$'\e[38;5;203m' PURPLE=$'\e[38;5;141m'
+else
+    B='' R='' BLUE='' GREEN='' YELLOW='' RED='' PURPLE=''
+fi
+
+say()  { printf '%s==>%s %s%s%s\n' "$BLUE" "$R" "$B" "$*" "$R"; }
+ok()   { printf '  %s✓%s %s\n' "$GREEN" "$R" "$*"; }
+warn() { printf '  %s!%s %s\n' "$YELLOW" "$R" "$*"; }
+bad()  { printf '  %s✗%s %s\n' "$RED" "$R" "$*"; }
+die()  { printf '%serror:%s %s\n' "$RED" "$R" "$*" >&2; exit 1; }
+has()  { command -v "$1" >/dev/null 2>&1; }
+
+# Run a command as root, asking for the password only when needed.
+root() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
+
+confirm() { # confirm "question" -> 0 on yes
+    [[ ${HORIZON_YES:-0} == 1 ]] && return 0
+    local answer
+    read -r -p "$1 [y/N] " answer
+    [[ $answer == [yY]* ]]
+}
+
+# --------------------------------------------------------------------- update
+
+cmd_update() {
+    say "Updating system packages (.deb)"
+    root apt-get update && root apt-get -y full-upgrade && root apt-get -y autoremove
+    if has flatpak; then
+        say "Updating Flatpak apps"
+        flatpak update -y --noninteractive || warn "Flatpak update failed"
+    fi
+    if has fwupdmgr; then
+        say "Checking firmware (UEFI, SSD, dock, peripherals…)"
+        fwupdmgr refresh --force >/dev/null 2>&1 || true
+        if fwupdmgr get-updates --no-unreported-check >/dev/null 2>&1; then
+            fwupdmgr get-updates --no-unreported-check 2>/dev/null | sed 's/^/  /'
+            if confirm "Install firmware updates now?"; then fwupdmgr update; fi
+        else
+            ok "Firmware is up to date"
+        fi
+    fi
+    [[ -e /var/run/reboot-required ]] && warn "A restart is needed to finish updating." || ok "All done"
+}
+
+# ------------------------------------------------------------ install/remove
+
+cmd_install() {
+    [[ $# -gt 0 ]] || die "usage: horizon install <package | ./file.deb | flatpak-app-id>"
+    local debs=() pkgs=() flatpaks=() a
+    for a in "$@"; do
+        if [[ $a == *.deb ]]; then
+            [[ -f $a ]] || die "no such file: $a"
+            debs+=("$(realpath "$a")")
+        elif [[ $a == *.*.* ]] && has flatpak; then
+            flatpaks+=("$a")          # reverse-DNS id, e.g. org.gimp.GIMP
+        else
+            pkgs+=("$a")
+        fi
+    done
+    if ((${#debs[@]})); then
+        say "Installing local .deb package(s) and their dependencies"
+        root apt-get install -y "${debs[@]}"
+    fi
+    if ((${#pkgs[@]})); then
+        local missing=()
+        for a in "${pkgs[@]}"; do apt-cache show "$a" >/dev/null 2>&1 || missing+=("$a"); done
+        if ((${#missing[@]})); then
+            root apt-get update -qq
+            missing=()
+            for a in "${pkgs[@]}"; do apt-cache show "$a" >/dev/null 2>&1 || missing+=("$a"); done
+        fi
+        local found=()
+        for a in "${pkgs[@]}"; do [[ " ${missing[*]} " == *" $a "* ]] || found+=("$a"); done
+        if ((${#found[@]})); then
+            say "Installing ${found[*]}"
+            root apt-get install -y "${found[@]}"
+        fi
+        for a in "${missing[@]}"; do
+            warn "'$a' is not an Ubuntu package."
+            if has flatpak; then
+                local hit
+                hit=$(flatpak search --columns=application "$a" 2>/dev/null | head -n1)
+                if [[ -n $hit && $hit != "No matches found" ]]; then
+                    confirm "Install $hit from Flathub instead?" && flatpak install -y flathub "$hit"
+                fi
+            fi
+        done
+    fi
+    if ((${#flatpaks[@]})); then
+        say "Installing from Flathub: ${flatpaks[*]}"
+        flatpak install -y flathub "${flatpaks[@]}"
+    fi
+}
+
+cmd_remove() {
+    [[ $# -gt 0 ]] || die "usage: horizon remove <package | flatpak-app-id>"
+    local a
+    for a in "$@"; do
+        if dpkg -s "$a" >/dev/null 2>&1; then
+            root apt-get remove -y "$a"
+        elif has flatpak && flatpak info "$a" >/dev/null 2>&1; then
+            flatpak uninstall -y "$a"
+        else
+            warn "'$a' is not installed"
+        fi
+    done
+    root apt-get -y autoremove >/dev/null
+}
+
+cmd_search() {
+    [[ $# -gt 0 ]] || die "usage: horizon search <words>"
+    say "Ubuntu packages (.deb)"
+    apt-cache search --names-only "$*" | sort | head -n 25 | sed "s/^\([^ ]*\) - /  ${B}\1${R} - /"
+    if has flatpak; then
+        say "Flathub apps"
+        flatpak search --columns=application,name,description "$*" 2>/dev/null | head -n 15 | sed 's/^/  /'
+    fi
+}
+
+cmd_list() {
+    say "Installed apps"
+    printf '  %s.deb packages:%s %s\n' "$B" "$R" "$(dpkg-query -f '${binary:Package}\n' -W | wc -l)"
+    has flatpak && printf '  %sFlatpak apps:%s  %s\n' "$B" "$R" "$(flatpak list --app --columns=application | wc -l)"
+    [[ ${1:-} == --all ]] && { apt-mark showmanual | column; has flatpak && flatpak list --app; }
+    return 0
+}
+
+# ---------------------------------------------------------------------- clean
+
+cmd_clean() {
+    say "Freeing disk space"
+    local before after
+    before=$(df --output=avail -B1M / | tail -n1)
+    root apt-get -y autoremove --purge >/dev/null && ok "Removed unused packages"
+    root apt-get -y clean && ok "Emptied the package cache"
+    has flatpak && flatpak uninstall -y --unused >/dev/null 2>&1 && ok "Removed unused Flatpak runtimes"
+    root journalctl --vacuum-time=14d >/dev/null 2>&1 && ok "Trimmed system logs to 14 days"
+    rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/thumbnails/"* 2>/dev/null && ok "Cleared thumbnail cache"
+    after=$(df --output=avail -B1M / | tail -n1)
+    ok "Freed $(( after - before )) MB"
+}
+
+# -------------------------------------------------------------------- drivers
+
+cmd_drivers() {
+    has ubuntu-drivers || die "ubuntu-drivers is not installed (sudo apt install ubuntu-drivers-common)"
+    case "${1:-list}" in
+        list)
+            say "Recommended drivers for this computer"
+            ubuntu-drivers devices 2>/dev/null | sed 's/^/  /'
+            ;;
+        install)
+            say "Installing recommended drivers"
+            root ubuntu-drivers install
+            mokutil --sb-state 2>/dev/null | grep -q enabled && \
+                warn "Secure Boot is on: if asked, set a MOK password and confirm it on the blue screen after restart."
+            ;;
+        *) die "usage: horizon drivers [list|install]" ;;
+    esac
+}
+
+# ------------------------------------------------------------------- firewall
+
+cmd_firewall() {
+    case "${1:-status}" in
+        status) root ufw status verbose ;;
+        on)     root ufw --force enable ;;
+        off)    root ufw disable ;;
+        allow)  [[ -n ${2:-} ]] || die "usage: horizon firewall allow <port[/proto] | app>"; root ufw allow "$2" ;;
+        deny)   [[ -n ${2:-} ]] || die "usage: horizon firewall deny <port[/proto] | app>"; root ufw deny "$2" ;;
+        kdeconnect)
+            root ufw allow 1714:1764/udp && root ufw allow 1714:1764/tcp && ok "KDE Connect can reach your phone" ;;
+        *) die "usage: horizon firewall [status|on|off|allow X|deny X|kdeconnect]" ;;
+    esac
+}
+
+# ------------------------------------------------------------------ snapshots
+
+cmd_snapshot() {
+    has timeshift || die "Timeshift is not installed (horizon install timeshift)"
+    case "${1:-list}" in
+        list)    root timeshift --list ;;
+        create)  root timeshift --create --comments "${2:-horizon snapshot}" ;;
+        restore) root timeshift --restore ;;
+        delete)  [[ -n ${2:-} ]] || die "usage: horizon snapshot delete <name>"; root timeshift --delete --snapshot "$2" ;;
+        *) die "usage: horizon snapshot [list|create [comment]|restore|delete NAME]" ;;
+    esac
+}
+
+# ------------------------------------------------------------------ UEFI/boot
+
+boot_mode() { [[ -d /sys/firmware/efi ]] && echo UEFI || echo "Legacy BIOS"; }
+
+secure_boot() {
+    if [[ ! -d /sys/firmware/efi ]]; then echo "not available"; return; fi
+    if has mokutil; then
+        mokutil --sb-state 2>/dev/null | grep -qi enabled && echo enabled || echo disabled
+    else
+        local f
+        f=$(ls /sys/firmware/efi/efivars/SecureBoot-* 2>/dev/null | head -n1)
+        [[ -n $f && $(od -An -t u1 -j4 -N1 "$f" 2>/dev/null | tr -d ' ') == 1 ]] && echo enabled || echo disabled
+    fi
+}
+
+cmd_uefi() {
+    case "${1:-status}" in
+        status)
+            say "Firmware"
+            printf '  %-16s %s\n' "Boot mode" "$(boot_mode)"
+            printf '  %-16s %s\n' "Secure Boot" "$(secure_boot)"
+            printf '  %-16s %s %s\n' "Firmware" "$(cat /sys/class/dmi/id/bios_vendor 2>/dev/null)" "$(cat /sys/class/dmi/id/bios_version 2>/dev/null)"
+            printf '  %-16s %s\n' "Firmware date" "$(cat /sys/class/dmi/id/bios_date 2>/dev/null)"
+            if mountpoint -q /boot/efi; then
+                printf '  %-16s %s (%s free)\n' "EFI partition" "$(findmnt -no SOURCE /boot/efi)" "$(df -h --output=avail /boot/efi | tail -n1 | tr -d ' ')"
+            fi
+            if [[ -d /sys/firmware/efi ]] && has efibootmgr; then
+                printf '  %-16s %s\n' "Booted entry" "$(efibootmgr 2>/dev/null | awk '/^BootCurrent/{print $2}')"
+                printf '  %-16s %s\n' "Boot order" "$(efibootmgr 2>/dev/null | awk '/^BootOrder/{print $2}')"
+            fi
+            ;;
+        entries)
+            [[ -d /sys/firmware/efi ]] || die "this computer booted in legacy BIOS mode"
+            say "UEFI boot entries (* = active)"
+            efibootmgr 2>/dev/null | grep '^Boot[0-9A-F]' | sed -E "s/^Boot([0-9A-F]{4})(\*?) (.*)/  \1\2  \3/" | cut -c1-100
+            ;;
+        firmware|setup)
+            [[ -d /sys/firmware/efi ]] || die "this computer booted in legacy BIOS mode"
+            confirm "Restart now into the UEFI firmware settings?" && systemctl reboot --firmware-setup
+            ;;
+        next)
+            [[ -n ${2:-} ]] || die "usage: horizon uefi next <entry number from 'horizon uefi entries'>"
+            root efibootmgr -n "$2" >/dev/null && ok "Next boot will use entry $2 (once)"
+            ;;
+        order)
+            [[ -n ${2:-} ]] || die "usage: horizon uefi order 0001,0000,…"
+            root efibootmgr -o "$2" >/dev/null && ok "Boot order set to $2"
+            ;;
+        firmware-update)
+            has fwupdmgr || die "fwupd is not installed"
+            fwupdmgr refresh --force; fwupdmgr update
+            ;;
+        *) die "usage: horizon uefi [status|entries|firmware|next N|order LIST|firmware-update]" ;;
+    esac
+}
+
+grub_set() { # grub_set KEY VALUE
+    root mkdir -p "$(dirname "$GRUB_USER_CFG")"
+    root touch "$GRUB_USER_CFG"
+    root sed -i "/^$1=/d" "$GRUB_USER_CFG"
+    echo "$1=$2" | root tee -a "$GRUB_USER_CFG" >/dev/null
+}
+
+cmd_boot() {
+    case "${1:-status}" in
+        status)
+            say "Boot menu"
+            local style timeout
+            style=$(grep -h '^GRUB_TIMEOUT_STYLE=' /etc/default/grub /etc/default/grub.d/*.cfg 2>/dev/null | tail -n1 | cut -d= -f2)
+            timeout=$(grep -h '^GRUB_TIMEOUT=' /etc/default/grub /etc/default/grub.d/*.cfg 2>/dev/null | tail -n1 | cut -d= -f2)
+            local theme
+            theme=$(grep -h '^GRUB_THEME=' /etc/default/grub.d/*.cfg 2>/dev/null | tail -n1 | cut -d= -f2)
+            printf '  %-12s %s\n' "Menu" "${style:-menu}" "Timeout" "${timeout:-?}s" "Theme" "${theme:-off}"
+            ;;
+        menu)
+            case "${2:-}" in
+                on)  grub_set GRUB_TIMEOUT_STYLE menu ;;
+                off) grub_set GRUB_TIMEOUT_STYLE hidden ;;
+                *) die "usage: horizon boot menu on|off" ;;
+            esac
+            root update-grub && ok "Boot menu ${2}"
+            ;;
+        timeout)
+            [[ ${2:-} =~ ^[0-9]+$ ]] || die "usage: horizon boot timeout <seconds>"
+            grub_set GRUB_TIMEOUT "$2"
+            root update-grub && ok "Boot menu timeout ${2}s"
+            ;;
+        theme)
+            case "${2:-}" in
+                on)  root rm -f /etc/default/grub.d/98-horizon-notheme.cfg ;;
+                off) echo 'GRUB_THEME=' | root tee /etc/default/grub.d/98-horizon-notheme.cfg >/dev/null ;;
+                *) die "usage: horizon boot theme on|off" ;;
+            esac
+            root update-grub && ok "Boot menu theme ${2}"
+            ;;
+        set)   # set several at once, one GRUB update: horizon boot set menu=on timeout=3 theme=on
+            shift
+            local kv
+            for kv in "$@"; do
+                case "$kv" in
+                    menu=on)   grub_set GRUB_TIMEOUT_STYLE menu ;;
+                    menu=off)  grub_set GRUB_TIMEOUT_STYLE hidden ;;
+                    timeout=*) [[ ${kv#*=} =~ ^[0-9]+$ ]] || die "bad timeout: $kv"; grub_set GRUB_TIMEOUT "${kv#*=}" ;;
+                    theme=on)  root rm -f /etc/default/grub.d/98-horizon-notheme.cfg ;;
+                    theme=off) echo 'GRUB_THEME=' | root tee /etc/default/grub.d/98-horizon-notheme.cfg >/dev/null ;;
+                    *) die "unknown boot setting: $kv" ;;
+                esac
+            done
+            root update-grub && ok "Boot menu updated"
+            ;;
+        *) die "usage: horizon boot [status|menu on|off|timeout N|theme on|off|set k=v…]" ;;
+    esac
+}
+
+# ---------------------------------------------------------------- appearance
+
+settings() { has horizon-settings || die "horizon-settings is not installed"; horizon-settings --set "$@"; }
+
+cmd_theme()  { [[ ${1:-} == @(light|dark) ]] || die "usage: horizon theme light|dark"; settings "mode=$1"; }
+cmd_accent() { [[ -n ${1:-} ]] || die "usage: horizon accent blue|purple|pink|red|orange|yellow|green|graphite|#RRGGBB"; settings "accent=$1"; }
+cmd_layout() { [[ ${1:-} == @(macos|focus|classic) ]] || die "usage: horizon layout macos|focus|classic"; settings "layout=$1"; }
+
+cmd_dock() {
+    case "${1:-}" in
+        position)  settings "dock-position=${2:?bottom|left|right}" ;;
+        size)      settings "dock-size=${2:?pixels, e.g. 56}" ;;
+        align)     settings "dock-alignment=${2:?left|center|right}" ;;
+        hide)      settings "dock-visibility=${2:?always|dodge|auto}" ;;
+        float)     settings "dock-floating=${2:?on|off}" ;;
+        pin)       settings "dock-pin=${2:?app, e.g. org.kde.kate}" ;;
+        unpin)     settings "dock-unpin=${2:?app, e.g. org.kde.kate}" ;;
+        *) die "usage: horizon dock position|size|align|hide|float|pin|unpin VALUE" ;;
+    esac
+}
+
+# --------------------------------------------------------------------- doctor
+
+cmd_doctor() {
+    say "Checking your system"
+    local avail pct failed
+    pct=$(df --output=pcent / | tail -n1 | tr -dc 0-9)
+    avail=$(df -h --output=avail / | tail -n1 | tr -d ' ')
+    (( pct < 90 )) && ok "Disk: $avail free" || bad "Disk almost full ($pct% used) — try 'horizon clean'"
+    failed=$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
+    [[ -z $failed ]] && ok "All system services running" || bad "Failed services: $failed (see: systemctl status <name>)"
+    local up
+    up=$(apt list --upgradable 2>/dev/null | grep -c upgradable)
+    (( up == 0 )) && ok "Packages up to date" || warn "$up package update(s) available — run 'horizon update'"
+    [[ -e /var/run/reboot-required ]] && warn "A restart is pending to finish updates"
+    ok "Boot mode: $(boot_mode), Secure Boot: $(secure_boot)"
+    if has ufw; then
+        root ufw status 2>/dev/null | grep -q 'Status: active' && ok "Firewall on" || warn "Firewall off — 'horizon firewall on'"
+    fi
+    swapon --show=NAME --noheadings 2>/dev/null | grep -q zram && ok "zram compressed swap active" || warn "zram swap not active"
+    if has ubuntu-drivers; then
+        local rec
+        rec=$(ubuntu-drivers devices 2>/dev/null | awk '/recommended/{print $3}' | head -n1)
+        if [[ -n $rec ]] && ! dpkg -s "$rec" >/dev/null 2>&1; then
+            warn "Recommended driver not installed: $rec — run 'horizon drivers install'"
+        else
+            ok "Drivers OK"
+        fi
+    fi
+    if has timeshift; then
+        root timeshift --list 2>/dev/null | grep -qE '^[0-9]+ +>' && ok "Timeshift snapshots exist" \
+            || warn "No system snapshots yet — 'horizon snapshot create'"
+    fi
+    if [[ -r /sys/class/power_supply/BAT0/capacity ]]; then
+        local full design
+        full=$(cat /sys/class/power_supply/BAT0/energy_full 2>/dev/null || cat /sys/class/power_supply/BAT0/charge_full 2>/dev/null)
+        design=$(cat /sys/class/power_supply/BAT0/energy_full_design 2>/dev/null || cat /sys/class/power_supply/BAT0/charge_full_design 2>/dev/null)
+        [[ -n $full && -n $design && $design -gt 0 ]] && ok "Battery health: $(( full * 100 / design ))%"
+    fi
+}
+
+# ----------------------------------------------------------------------- help
+
+cmd_help() {
+    cat <<EOF
+${B}${PURPLE}horizon${R} — everyday commands for ${B}$NAME${R} $VERSION
+
+${B}Software${R}
+  horizon update                   Update .deb packages, Flatpaks and firmware
+  horizon install <name|file.deb>  Install from Ubuntu, a local .deb, or Flathub
+  horizon remove <name>            Remove a package or Flatpak
+  horizon search <words>           Search Ubuntu packages and Flathub
+  horizon list [--all]             Count (or list) installed apps
+  horizon clean                    Free disk space (caches, old packages, logs)
+
+${B}System${R}
+  horizon info                     System summary (same as horizonfetch)
+  horizon doctor                   Health check with tips
+  horizon drivers [list|install]   Recommended GPU/Wi-Fi drivers
+  horizon firewall [status|on|off|allow X|deny X|kdeconnect]
+  horizon snapshot [list|create|restore|delete NAME]   Timeshift backups
+
+${B}UEFI & boot${R}
+  horizon uefi [status]            Boot mode, Secure Boot, firmware, EFI partition
+  horizon uefi entries             List UEFI boot entries
+  horizon uefi firmware            Restart into UEFI firmware settings
+  horizon uefi next <N>            Boot entry N once on next restart
+  horizon uefi order <list>        Change the UEFI boot order
+  horizon uefi firmware-update     Update UEFI/device firmware (fwupd)
+  horizon boot [status]            Boot menu settings
+  horizon boot menu on|off         Show or hide the boot menu
+  horizon boot timeout <seconds>   Boot menu timeout
+  horizon boot theme on|off        Graphical boot menu theme
+
+${B}Look & feel${R}
+  horizon theme light|dark
+  horizon accent blue|purple|pink|red|orange|yellow|green|graphite|#RRGGBB
+  horizon layout macos|focus|classic
+  horizon dock position bottom|left|right     horizon dock size 56
+  horizon dock align left|center|right        horizon dock hide always|dodge|auto
+  horizon dock float on|off                   horizon dock pin|unpin <app>
+
+Add ${B}-y${R} to answer yes to questions. More: ${BLUE}@DISTRO_URL@${R}
+EOF
+}
+
+# ----------------------------------------------------------------------- main
+
+[[ ${1:-} == -y ]] && { HORIZON_YES=1; shift; }
+cmd="${1:-help}"
+shift 2>/dev/null || true
+case "$cmd" in
+    update|upgrade)        cmd_update "$@" ;;
+    install|add)           cmd_install "$@" ;;
+    remove|uninstall)      cmd_remove "$@" ;;
+    search|find)           cmd_search "$@" ;;
+    list)                  cmd_list "$@" ;;
+    clean|cleanup)         cmd_clean "$@" ;;
+    info|fetch)            exec horizonfetch "$@" ;;
+    doctor|check)          cmd_doctor "$@" ;;
+    drivers)               cmd_drivers "$@" ;;
+    firewall|fw)           cmd_firewall "$@" ;;
+    snapshot|backup)       cmd_snapshot "$@" ;;
+    uefi|firmware)         cmd_uefi "$@" ;;
+    boot|grub)             cmd_boot "$@" ;;
+    theme)                 cmd_theme "$@" ;;
+    accent)                cmd_accent "$@" ;;
+    layout)                cmd_layout "$@" ;;
+    dock)                  cmd_dock "$@" ;;
+    version|--version|-v)  echo "$NAME $VERSION" ;;
+    help|--help|-h)        cmd_help ;;
+    *) printf 'Unknown command: %s\n\n' "$cmd" >&2; cmd_help; exit 1 ;;
+esac

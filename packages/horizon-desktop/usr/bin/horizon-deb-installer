@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""Package Installer — double-click a .deb file to install it on @DISTRO_NAME@.
+
+Shows what the package is, then installs it together with its dependencies
+through apt (asking for your password once).
+"""
+
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+from PyQt6.QtCore import QProcess, Qt
+from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtWidgets import (
+    QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout,
+)
+
+HELPER = "/usr/libexec/horizon/install-deb"
+FIELDS = ["Package", "Version", "Architecture", "Maintainer", "Installed-Size", "Depends", "Description", "Homepage"]
+
+
+def deb_info(path):
+    info = {}
+    for field in FIELDS:
+        res = subprocess.run(["dpkg-deb", "-f", path, field], capture_output=True, text=True)
+        info[field] = res.stdout.strip() if res.returncode == 0 else ""
+    return info
+
+
+def installed_version(pkg):
+    res = subprocess.run(["dpkg-query", "-W", "-f=${Status}|${Version}", pkg], capture_output=True, text=True)
+    if res.returncode == 0 and res.stdout.startswith("install ok installed"):
+        return res.stdout.split("|", 1)[1]
+    return None
+
+
+def compare_versions(a, op, b):
+    return subprocess.run(["dpkg", "--compare-versions", a, op, b]).returncode == 0
+
+
+def native_arch():
+    return subprocess.run(["dpkg", "--print-architecture"], capture_output=True, text=True).stdout.strip()
+
+
+class Installer(QDialog):
+    def __init__(self, paths):
+        super().__init__()
+        self.paths = [str(Path(p).resolve()) for p in paths]
+        self.infos = [deb_info(p) for p in self.paths]
+        self.setWindowTitle("Package Installer")
+        self.setWindowIcon(QIcon.fromTheme("system-software-install"))
+        self.resize(560, 460)
+
+        box = QVBoxLayout(self)
+        box.setContentsMargins(24, 22, 24, 18)
+        box.setSpacing(12)
+        head = QHBoxLayout()
+        icon = QLabel()
+        icon.setPixmap(QIcon.fromTheme("package-x-generic", QIcon.fromTheme("system-software-install")).pixmap(64, 64))
+        head.addWidget(icon, 0, Qt.AlignmentFlag.AlignTop)
+        text = QVBoxLayout()
+        title = QLabel()
+        f = title.font()
+        f.setPointSizeF(f.pointSizeF() * 1.5)
+        f.setWeight(QFont.Weight.DemiBold)
+        title.setFont(f)
+        self.subtitle = QLabel()
+        self.subtitle.setWordWrap(True)
+        text.setSpacing(4)
+        text.addWidget(title)
+        text.addWidget(self.subtitle)
+        text.addStretch(1)
+        head.addLayout(text, 1)
+        box.addLayout(head)
+
+        self.details = QLabel()
+        self.details.setWordWrap(True)
+        self.details.setTextFormat(Qt.TextFormat.RichText)
+        self.details.setOpenExternalLinks(True)
+        box.addWidget(self.details)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.hide()
+        box.addWidget(self.progress)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setFont(QFont("monospace", 9))
+        self.log.hide()
+        box.addWidget(self.log, 1)
+        box.addStretch(1)
+
+        buttons = QHBoxLayout()
+        self.toggle_log = QPushButton("Show details")
+        self.toggle_log.clicked.connect(lambda: self.log.setVisible(not self.log.isVisible()))
+        self.toggle_log.hide()
+        buttons.addWidget(self.toggle_log)
+        buttons.addStretch(1)
+        self.cancel = QPushButton("Cancel")
+        self.cancel.clicked.connect(self.reject)
+        self.install = QPushButton("Install")
+        self.install.setDefault(True)
+        self.install.clicked.connect(self.run_install)
+        buttons.addWidget(self.cancel)
+        buttons.addWidget(self.install)
+        box.addLayout(buttons)
+
+        self.process = None
+        self._describe(title)
+
+    def _describe(self, title):
+        arch = native_arch()
+        if len(self.infos) == 1:
+            i = self.infos[0]
+            summary, _, long_desc = i["Description"].partition("\n")
+            title.setText(i["Package"] or Path(self.paths[0]).name)
+            self.subtitle.setText(summary or "Debian package")
+            have = installed_version(i["Package"]) if i["Package"] else None
+            rows = [("Version", i["Version"])]
+            if have:
+                if compare_versions(i["Version"], "gt", have):
+                    rows.append(("Installed", f"{have} — this is an <b>update</b>"))
+                    self.install.setText("Update")
+                elif compare_versions(i["Version"], "eq", have):
+                    rows.append(("Installed", "this version is already installed"))
+                    self.install.setText("Reinstall")
+                else:
+                    rows.append(("Installed", f"{have} — this is an <b>older</b> version"))
+                    self.install.setText("Downgrade")
+            try:
+                rows.append(("Size", f"{int(i['Installed-Size']) / 1024:.1f} MB installed"))
+            except ValueError:
+                pass
+            rows += [("Publisher", i["Maintainer"]), ("Needs", i["Depends"][:300])]
+            if i["Homepage"]:
+                rows.append(("Website", f'<a href="{i["Homepage"]}">{i["Homepage"]}</a>'))
+            html = "".join(f"<tr><td style='padding-right:14px;color:gray'>{k}</td><td>{v}</td></tr>"
+                           for k, v in rows if v)
+            desc = " ".join(l.strip() for l in long_desc.splitlines() if l.strip() != ".")[:500]
+            self.details.setText(f"<table>{html}</table><p>{desc}</p>")
+        else:
+            title.setText(f"{len(self.infos)} packages")
+            self.subtitle.setText("These packages will be installed together.")
+            self.details.setText("<br>".join(f"<b>{i['Package']}</b> {i['Version']}" for i in self.infos))
+
+        bad = [i["Package"] for i in self.infos if i["Architecture"] not in ("all", arch, "")]
+        if bad:
+            self.install.setEnabled(False)
+            self.subtitle.setText(f"Can't install: made for a different processor ({', '.join(bad)}).")
+        self.details.setText(self.details.text() + (
+            "<p style='color:gray'>Only install packages from sources you trust — "
+            "they get full access to your computer.</p>"))
+
+    def run_install(self):
+        if not shutil.which("pkexec"):
+            QMessageBox.critical(self, "Package Installer", "pkexec is missing; use: horizon install FILE.deb")
+            return
+        self.install.setEnabled(False)
+        self.cancel.setEnabled(False)
+        self.progress.show()
+        self.toggle_log.show()
+        self.subtitle.setText("Installing… you may be asked for your password.")
+        self.process = QProcess(self)
+        self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self.process.readyReadStandardOutput.connect(self._output)
+        self.process.finished.connect(self._done)
+        self.process.start("pkexec", [HELPER] + self.paths)
+
+    def _output(self):
+        text = bytes(self.process.readAllStandardOutput()).decode(errors="replace")
+        self.log.appendPlainText(text.rstrip())
+        last = [l for l in text.splitlines() if l.strip()]
+        if last:
+            self.subtitle.setText(last[-1][:90])
+
+    def _done(self, code, _status):
+        self.progress.hide()
+        self.cancel.setEnabled(True)
+        self.cancel.setText("Close")
+        if code == 0:
+            self.subtitle.setText("Installed. You'll find it in Launchpad and the app menu.")
+            self.install.hide()
+        elif code in (126, 127):
+            self.subtitle.setText("Cancelled — no password was given.")
+            self.install.setEnabled(True)
+        else:
+            self.subtitle.setText("Installation failed. See the details below.")
+            self.log.show()
+            self.install.setEnabled(True)
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("horizon-deb-installer")
+    app.setDesktopFileName("org.horizon.debinstaller")
+    paths = [p for p in sys.argv[1:] if not p.startswith("-")]
+    if not paths:
+        files, _ = QFileDialog.getOpenFileNames(None, "Choose .deb packages", str(Path.home() / "Downloads"),
+                                                "Debian packages (*.deb)")
+        paths = files
+    paths = [p for p in paths if p.endswith(".deb") and Path(p).is_file()]
+    if not paths:
+        return 0
+    dlg = Installer(paths)
+    dlg.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
