@@ -13,8 +13,10 @@ python aesv2.py decrypt "<base64 output>" -p mypassword
 python aesv2.py encrypt -i photo.jpg -o photo.jpg.av2   # files
 python aesv2.py decrypt -i photo.jpg.av2 -o photo.jpg
 
+python pattern.py table -p mypassword   # one unique replacement per letter (see PATTERN.md)
+
 python demo.py                       # weak substitution cipher vs AES v2
-python -m unittest discover tests    # 25 tests
+python -m unittest discover tests    # all tests
 ```
 
 In Python:
